@@ -178,18 +178,27 @@ class SchoolLiveApp:
         delay_ms    = max(0, (play_at_ms or 0) - server_now) if play_at_ms else 0
 
         # Minden adatot kimásolunk – nincs closure hivatkozás
+        # Snapcast buffer kompenzáció: a snapclient ~1000ms-vel késlelteti a hangot,
+        # ezért az overlay-t is 1000ms-vel KORÁBBAN kell megjeleníteni
+        SNAPCLIENT_BUFFER_MS = 1000
+
+        snap_usable = bool(
+            prepare.get("snap_active", False)
+            and self._snap.available
+            and self._snap.connected
+        )
+
+        # Overlay delay = playAt delay - snapclient buffer (min 0)
+        overlay_delay_ms = max(0, delay_ms - (SNAPCLIENT_BUFFER_MS if snap_usable else 0))
+
         ctx = {
             "action":      prepare.get("action", ""),
             "url":         prepare.get("url"),
             "text":        prepare.get("text"),
-            "title":       prepare.get("title"),
-            "snap_usable": bool(
-                prepare.get("snap_active", False)
-                and self._snap.available
-                and self._snap.connected
-            ),
+            "title":       "Iskolarádió",
+            "snap_usable": snap_usable,
             "volume":      self._volume,
-            "delay_ms":    delay_ms,
+            "delay_ms":    overlay_delay_ms,
         }
 
         def _execute(ctx=ctx):
@@ -230,6 +239,7 @@ class SchoolLiveApp:
         action      = msg.get("action", "")
         snap_active = msg.get("snapcastActive", False)
         snap_usable = snap_active and self._snap.available and self._snap.connected
+        SNAPCLIENT_BUFFER_MS = 1000
 
         if action == "BELL":
             url = msg.get("url", "")
@@ -238,32 +248,44 @@ class SchoolLiveApp:
             if self._last_bell_key == key:
                 return
             self._last_bell_key = key
-            self.ui.show_bell_banner(True)
-            if not snap_usable and url:
-                sound_file = url.split("/")[-1]
-                audio.play_bell(sound_file, self._volume / 10,
-                                on_done=lambda: self.ui.show_bell_banner(False))
-            else:
-                threading.Timer(3.0, lambda: self.ui.show_bell_banner(False)).start()
+            def _show_bell(snap_usable=snap_usable, url=url):
+                if snap_usable:
+                    time.sleep(SNAPCLIENT_BUFFER_MS / 1000)
+                self.ui.show_bell_banner(True)
+                if not snap_usable and url:
+                    sound_file = url.split("/")[-1]
+                    audio.play_bell(sound_file, self._volume / 10,
+                                    on_done=lambda: self.ui.show_bell_banner(False))
+                else:
+                    threading.Timer(3.0, lambda: self.ui.show_bell_banner(False)).start()
+            threading.Thread(target=_show_bell, daemon=True).start()
 
         elif action == "TTS":
             url  = msg.get("url")
             text = msg.get("text", "")
             if text:
                 reading_ms = self._calc_reading_ms(text)
-                self.ui.show_message_overlay(text, reading_ms)
-                if not snap_usable and url:
-                    audio.play_url(url, self._volume / 10)
+                def _show_tts(snap_usable=snap_usable, url=url, text=text, reading_ms=reading_ms):
+                    if snap_usable:
+                        time.sleep(SNAPCLIENT_BUFFER_MS / 1000)
+                    self.ui.show_message_overlay(text, reading_ms)
+                    if not snap_usable and url:
+                        audio.play_url(url, self._volume / 10)
+                threading.Thread(target=_show_tts, daemon=True).start()
 
         elif action == "PLAY_URL":
-            title = msg.get("title", "Iskolarádió")
-            url   = msg.get("url")
-            self.ui.show_radio_overlay(title)
-            if not snap_usable and url:
-                audio.play_url(url, self._volume / 10)
+            url = msg.get("url")
+            def _show_radio(snap_usable=snap_usable, url=url):
+                if snap_usable:
+                    time.sleep(SNAPCLIENT_BUFFER_MS / 1000)
+                self.ui.show_radio_overlay("Iskolarádió")
+                if not snap_usable and url:
+                    audio.play_url(url, self._volume / 10)
+            threading.Thread(target=_show_radio, daemon=True).start()
 
         elif action == "STOP_PLAYBACK":
             audio.stop()
+            self._snap.restart()        # snapclient újraindítás
             self.ui.hide_overlay()
             self.ui.show_bell_banner(False)
 

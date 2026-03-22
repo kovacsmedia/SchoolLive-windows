@@ -59,9 +59,19 @@ class SnapcastManager:
         self._thread.start()
 
     def stop(self) -> None:
+        """Leállítja a snapclientet. A start() újra meghívható."""
         with self._lock:
             self._running = False
         self._kill_proc()
+
+    def restart(self) -> None:
+        """Leállítja majd újraindítja a snapclientet."""
+        self.stop()
+        time.sleep(0.5)
+        with self._lock:
+            self._running = True
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
 
     def set_volume(self, volume: int) -> None:
         """0-100"""

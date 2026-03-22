@@ -368,12 +368,14 @@ class PlayerUI(QMainWindow):
                 f"font-size: 96px; font-weight: 900; letter-spacing: -2px;"
             )
 
-        # Óra – abszolút pozíció a content-en belül
-        self._lbl_clock = QLabel("--:--:--", content)
+        # Óra – monospace font hogy ne imbolyogjon
+        self._lbl_clock = QLabel("00:00:00", content)
         self._lbl_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_clock.setStyleSheet(
             f"color: {TEXT}; font-size: 120px; font-weight: 900;"
-            f"letter-spacing: -4px; background: transparent;"
+            f"letter-spacing: -2px; background: transparent;"
+            f"font-variant-numeric: tabular-nums;"
+            f"font-family: 'Courier New', 'Consolas', monospace;"
         )
 
         # Dátum
@@ -899,6 +901,16 @@ class PlayerUI(QMainWindow):
         self._lbl_radio_title.show()
         self._lbl_radio_time.show()
         self._radio_prog.show()
+        self._overlay_visible = True
+
+        # Pulsing progress animáció (nem tudjuk a végét)
+        self._radio_prog.set_colors(BLUE, PURPLE)
+        self._radio_prog.set_pct(0.0)
+        self._radio_pulse_step = 0
+        self._radio_pulse_timer = QTimer(self)
+        self._radio_pulse_timer.setInterval(50)
+        self._radio_pulse_timer.timeout.connect(self._radio_pulse_tick)
+        self._radio_pulse_timer.start()
 
         self._overlay.show()
         self._overlay.raise_()
@@ -906,10 +918,18 @@ class PlayerUI(QMainWindow):
         if cw:
             self._overlay.setGeometry(0, 0, cw.width(), cw.height())
 
+    def _radio_pulse_tick(self):
+        self._radio_pulse_step += 1
+        import math
+        pct = (math.sin(self._radio_pulse_step * 0.08) + 1) / 2
+        self._radio_prog.set_pct(pct)
+
     def _do_hide_overlay(self):
         self._prog_timer.stop()
         if self._dismiss_timer:
             self._dismiss_timer.stop()
+        if hasattr(self, "_radio_pulse_timer") and self._radio_pulse_timer:
+            self._radio_pulse_timer.stop()
         self._overlay_visible = False
         self._overlay.hide()
 
