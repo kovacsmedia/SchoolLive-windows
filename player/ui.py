@@ -195,7 +195,6 @@ class PlayerUI(QMainWindow):
         self._overlay_visible = False
         self._banner_visible  = False
         self._update_click_cb: Optional[Callable] = None
-        self.on_login: Optional[Callable] = None
         self.on_volume_change: Optional[Callable] = None
 
         self._setup_window()
@@ -271,19 +270,17 @@ class PlayerUI(QMainWindow):
         # Header
         self._root_layout.addWidget(self._build_header())
 
-        # Stacked: main / login / pending
+        # Stacked: main / pending
         self._stack = QStackedWidget()
         self._root_layout.addWidget(self._stack)
 
-        self._main_widget   = self._build_main()
-        self._login_widget  = self._build_login()
+        self._main_widget    = self._build_main()
         self._pending_widget = self._build_pending()
 
         self._stack.addWidget(self._main_widget)    # 0
-        self._stack.addWidget(self._login_widget)   # 1
-        self._stack.addWidget(self._pending_widget) # 2
+        self._stack.addWidget(self._pending_widget) # 1
 
-        self._stack.setCurrentIndex(1)  # login először
+        self._stack.setCurrentIndex(1)  # provisioning képernyő először
 
         # Overlay (a main_widget felett, abszolút pozíció)
         self._overlay = self._build_overlay()
@@ -515,65 +512,14 @@ class PlayerUI(QMainWindow):
 
         return frame
 
-    # ── Login overlay ──────────────────────────────────────────────────────────
+    # ── Login overlay – ELTÁVOLÍTVA (native player: hardver ID alapú provisioning) ──
     def _build_login(self) -> QWidget:
+        # Nem használt – megtartva a kompatibilitás miatt
         w = QWidget()
-        w.setStyleSheet(f"background: {BG};")
-        outer = QVBoxLayout(w)
-        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        card = QFrame()
-        card.setObjectName("card")
-        card.setFixedWidth(420)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(12)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        icon = QLabel("🔊")
-        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setStyleSheet("font-size: 56px; background: transparent;")
-        layout.addWidget(icon)
-
-        title = QLabel("SchoolLive Player")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet(f"color: {TEXT}; font-size: 22px; font-weight: 800;")
-        layout.addWidget(title)
-
-        sub = QLabel("Bejelentkezés")
-        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
-        layout.addWidget(sub)
-        layout.addSpacing(12)
-
-        lbl_email = QLabel("Email")
-        lbl_email.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
-        layout.addWidget(lbl_email)
-        self._entry_email = QLineEdit()
-        self._entry_email.setPlaceholderText("pelda@iskola.hu")
-        layout.addWidget(self._entry_email)
-
-        lbl_pass = QLabel("Jelszó")
-        lbl_pass.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
-        layout.addWidget(lbl_pass)
-        self._entry_pass = QLineEdit()
-        self._entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self._entry_pass.setPlaceholderText("••••••••")
-        self._entry_pass.returnPressed.connect(self._do_login)
-        layout.addWidget(self._entry_pass)
-
-        self._lbl_login_err = QLabel("")
-        self._lbl_login_err.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_login_err.setStyleSheet(f"color: {RED}; font-size: 12px;")
-        layout.addWidget(self._lbl_login_err)
-
-        self._btn_login = QPushButton("▶  Belépés")
-        self._btn_login.setFixedHeight(48)
-        self._btn_login.clicked.connect(self._do_login)
-        layout.addWidget(self._btn_login)
-
-        outer.addWidget(card)
         return w
+
+    def _do_login(self):
+        pass  # nem használt
 
     # ── Pending overlay ────────────────────────────────────────────────────────
     def _build_pending(self) -> QWidget:
@@ -944,21 +890,19 @@ class PlayerUI(QMainWindow):
         self._update_banner.show()
 
     def _do_show_login(self):
-        self._stack.setCurrentIndex(1)
+        pass  # nincs login a native playerben
 
     def _do_hide_login(self):
-        self._stack.setCurrentIndex(0)
+        pass
 
     def _do_show_pending(self):
-        self._stack.setCurrentIndex(2)
+        self._stack.setCurrentIndex(1)
 
     def _do_hide_pending(self):
         self._stack.setCurrentIndex(0)
 
     def _do_set_login_error(self, msg: str):
-        self._lbl_login_err.setText(msg)
-        self._btn_login.setEnabled(True)
-        self._btn_login.setText("▶  Belépés")
+        pass  # nincs login
 
     def _do_set_volume(self, vol: int):
         self._volume = vol
