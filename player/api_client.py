@@ -161,7 +161,20 @@ def fetch_bells(device_key: str) -> list:
         print(f"[API] fetchBells hiba: {e}")
         return []
 
-def fetch_server_time() -> Optional[int]:
+def fetch_tenant_name(device_key: str) -> Optional[str]:
+    """Visszaadja az intézmény nevét device key alapján."""
+    try:
+        req = urllib.request.Request(
+            f"{API_BASE}/devices/native/info",
+            headers={"x-device-key": device_key},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("tenantName")
+    except Exception as e:
+        print(f"[API] fetch_tenant_name hiba: {e}")
+        return None
     """Unix ms"""
     try:
         resp = _request("GET", "/time")

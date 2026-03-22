@@ -88,13 +88,32 @@ class SnapcastManager:
             time.sleep(self._restart_delay)
 
     def _start_proc(self) -> None:
-        args = [
-            self._bin,
-            "--host",   self._server_host,
-            "--port",   "1704",
-            "--logfilter", "error",
-            "--volume", str(self._volume),
-        ]
+        # Flatpak sandbox esetén flatpak-spawn --host-el futtatjuk
+        import shutil
+        use_flatpak_spawn = (
+            self._bin.startswith("/run/host/")
+            and shutil.which("flatpak-spawn") is not None
+        )
+
+        if use_flatpak_spawn:
+            # A bináris valódi útvonala a hoszon (run/host prefix nélkül)
+            host_bin = self._bin.replace("/run/host", "")
+            args = [
+                "flatpak-spawn", "--host",
+                host_bin,
+                "--host",   self._server_host,
+                "--port",   "1704",
+                "--logfilter", "error",
+                "--volume", str(self._volume),
+            ]
+        else:
+            args = [
+                self._bin,
+                "--host",   self._server_host,
+                "--port",   "1704",
+                "--logfilter", "error",
+                "--volume", str(self._volume),
+            ]
         # Windows: elrejti a konzolablakot
         kwargs = {}
         if platform.system() == "Windows":

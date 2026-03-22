@@ -20,22 +20,28 @@ SNAPCLIENT_CANDIDATES_WIN = [
 SNAPCLIENT_CANDIDATES_LINUX = [
     "/usr/bin/snapclient",
     "/usr/local/bin/snapclient",
+    "/run/host/usr/bin/snapclient",   # Flatpak sandbox
     str(Path.home() / ".local" / "bin" / "snapclient"),
     "snapclient",
 ]
 
 def get_snapclient_bin() -> str | None:
+    import shutil
     candidates = (
         SNAPCLIENT_CANDIDATES_WIN
         if platform.system() == "Windows"
         else SNAPCLIENT_CANDIDATES_LINUX
     )
     for c in candidates:
-        if Path(c).is_file() or c in ("snapclient.exe", "snapclient"):
-            # PATH-ban lévőt shutil-lel ellenőrizzük
-            import shutil
-            if Path(c).is_file() or shutil.which(c):
+        # Abszolút útvonal: közvetlen fájl ellenőrzés
+        if Path(c).is_absolute():
+            if Path(c).is_file():
                 return c
+        else:
+            # Relatív név: PATH-ban keresés
+            found = shutil.which(c)
+            if found:
+                return found
     return None
 
 # Adat könyvtár (token, client_id, hangok cache)

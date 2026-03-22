@@ -106,6 +106,13 @@ class SchoolLiveApp:
         print(f"[App] Aktiválva: {SHORT_ID}")
         self._status = "active"
 
+        # Intézmény neve a backendről
+        def _fetch_name():
+            name = api.fetch_tenant_name(DEVICE_KEY)
+            if name:
+                self.ui.set_institution(name)
+        threading.Thread(target=_fetch_name, daemon=True).start()
+
         # Snapcast indítás
         if self._snap.available:
             self._snap.start()

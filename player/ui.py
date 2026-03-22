@@ -196,6 +196,8 @@ class PlayerUI(QMainWindow):
         self._banner_visible  = False
         self._update_click_cb: Optional[Callable] = None
         self.on_volume_change: Optional[Callable] = None
+        self._dismiss_step    = 0
+        self._dismiss_timer:  Optional[QTimer] = None
 
         self._setup_window()
         self._build_ui()
@@ -724,9 +726,10 @@ class PlayerUI(QMainWindow):
         self._prog_bar.set_colors(AMBER, RED)
         self._prog_bar.set_pct(1.0)
         self._dismiss_step = 0
-        self._dismiss_timer = QTimer()
-        self._dismiss_timer.setInterval(16)  # ~60fps
-        self._dismiss_timer.timeout.connect(self._dismiss_tick)
+        if self._dismiss_timer is None:
+            self._dismiss_timer = QTimer(self)
+            self._dismiss_timer.setInterval(16)
+            self._dismiss_timer.timeout.connect(self._dismiss_tick)
         self._dismiss_timer.start()
 
     def _dismiss_tick(self):
@@ -864,8 +867,8 @@ class PlayerUI(QMainWindow):
 
         # Betűméret a szöveg hosszától
         l = len(text.strip())
-        if l <= 40:   size = 52
-        elif l <= 80: size = 38
+        if l <= 40:    size = 52
+        elif l <= 80:  size = 38
         elif l <= 160: size = 28
         else:          size = 21
 
@@ -876,12 +879,12 @@ class PlayerUI(QMainWindow):
         self._lbl_msg_text.show()
 
         self._prog_bar.show()
+        self._overlay_visible = True
         if reading_ms > 0:
             self._start_progress(reading_ms)
 
         self._overlay.show()
         self._overlay.raise_()
-        # Overlay méret igazítás
         cw = self.centralWidget()
         if cw:
             self._overlay.setGeometry(0, 0, cw.width(), cw.height())
@@ -905,6 +908,9 @@ class PlayerUI(QMainWindow):
 
     def _do_hide_overlay(self):
         self._prog_timer.stop()
+        if self._dismiss_timer:
+            self._dismiss_timer.stop()
+        self._overlay_visible = False
         self._overlay.hide()
 
     def _do_show_update_banner(self, text: str):
