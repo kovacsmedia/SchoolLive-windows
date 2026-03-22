@@ -124,6 +124,15 @@ def provision() -> str:
         print(f"[API] Provisioning hiba: {e}")
         return "pending"
 
+def get_cached_device_id() -> Optional[str]:
+    p = get_data_dir() / "device_id.txt"
+    if p.exists():
+        return p.read_text().strip() or None
+    return None
+
+def save_device_id(device_id: str) -> None:
+    (get_data_dir() / "device_id.txt").write_text(device_id)
+
 def poll_status() -> str:
     """Ellenőrzi hogy az eszköz aktív-e már."""
     try:

@@ -10,7 +10,6 @@ import threading
 import urllib.request
 from typing   import Optional, Callable
 from config   import WS_URL, API_BASE
-from api_client import get_token, CLIENT_ID, relogin
 
 try:
     import websockets

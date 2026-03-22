@@ -472,9 +472,8 @@ class PlayerUI(QMainWindow):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(20, 0, 20, 0)
 
-        from api_client import CLIENT_ID
-        short_id = "WP-" + CLIENT_ID[:8].upper()
-        lbl_id = QLabel(f"📱  {short_id}")
+        from api_client import SHORT_ID
+        lbl_id = QLabel(f"📱  {SHORT_ID}")
         lbl_id.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
         layout.addWidget(lbl_id)
 
@@ -613,8 +612,8 @@ class PlayerUI(QMainWindow):
         lbl_id_title.setStyleSheet(
             f"color: {TEXT_DIM}; font-size: 10px; letter-spacing: 1px;"
         )
-        from api_client import CLIENT_ID
-        lbl_id = QLabel("WP-" + CLIENT_ID[:8].upper())
+        from api_client import SHORT_ID
+        lbl_id = QLabel(SHORT_ID)
         lbl_id.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_id.setStyleSheet(f"color: {BLUE}; font-size: 18px; font-weight: 700;")
         c_layout.addWidget(lbl_id_title)

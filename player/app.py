@@ -118,6 +118,7 @@ class SchoolLiveApp:
 
         # Háttér taskok
         threading.Thread(target=self._bell_tick_loop, daemon=True).start()
+        threading.Thread(target=self._beacon_loop,    daemon=True).start()
 
         # Auto-updater
         self._updater.start()
@@ -250,7 +251,28 @@ class SchoolLiveApp:
         else:
             self.ui.set_cache_status("⚠ Csengetési rend üres")
 
-    # ── Offline bell ticker ────────────────────────────────────────────────────
+    # ── Beacon loop ───────────────────────────────────────────────────────────
+    def _beacon_loop(self) -> None:
+        """30 másodpercenként jelzi a backendnek hogy az eszköz online."""
+        while True:
+            try:
+                import urllib.request, json
+                from config import API_BASE
+                body = json.dumps({
+                    "hardwareId": HARDWARE_ID,
+                    "shortId":    SHORT_ID,
+                }).encode()
+                req = urllib.request.Request(
+                    f"{API_BASE}/devices/native/beacon",
+                    data=body,
+                    headers={"Content-Type": "application/json",
+                             "x-device-key": DEVICE_KEY},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=5)
+            except Exception:
+                pass
+            time.sleep(BEACON_INTERVAL_S)
     def _bell_tick_loop(self) -> None:
         while True:
             time.sleep(5)
