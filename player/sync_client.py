@@ -60,12 +60,14 @@ class SyncClient:
                  on_play:      Callable[[dict], None],
                  on_immediate: Callable[[dict], None],
                  on_connected: Optional[Callable] = None,
-                 on_disconnected: Optional[Callable] = None):
+                 on_disconnected: Optional[Callable] = None,
+                 device_key: Optional[str] = None):
         self._on_prepare      = on_prepare
         self._on_play         = on_play
         self._on_immediate    = on_immediate
         self._on_connected    = on_connected
         self._on_disconnected = on_disconnected
+        self._device_key      = device_key   # JWT helyett device key (mint ESP32)
         self._ws              = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -106,11 +108,17 @@ class SyncClient:
 
     async def _connect_loop(self) -> None:
         while self._running:
-            token = get_token()
-            if not token:
-                await asyncio.sleep(2)
-                continue
-            url = f"{WS_URL}?token={token}&clientId={CLIENT_ID}"
+            # Device key auth (mint ESP32) – JWT nélkül
+            if self._device_key:
+                url = f"{WS_URL}?deviceKey={self._device_key}"
+            else:
+                # Fallback: token alapú (régi VP mód)
+                from api_client import get_token, CLIENT_ID
+                token = get_token()
+                if not token:
+                    await asyncio.sleep(2)
+                    continue
+                url = f"{WS_URL}?token={token}&clientId={CLIENT_ID}"
             try:
                 async with websockets.connect(
                     url,
@@ -136,6 +144,13 @@ class SyncClient:
                             continue
                         self._handle(msg)
 
+            except websockets.exceptions.ConnectionClosedError as e:
+                if e.code == 4010:
+                    # Saját magunk váltottuk le (másik példány) – várunk hosszabbat
+                    print(f"[SyncClient] 4010 – replaced, újrapróbálás 10s múlva")
+                    await asyncio.sleep(10)
+                else:
+                    print(f"[SyncClient] WS hiba: {e}")
             except Exception as e:
                 print(f"[SyncClient] WS hiba: {e}")
             finally:

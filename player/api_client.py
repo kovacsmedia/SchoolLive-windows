@@ -1,65 +1,89 @@
-# schoollive_player/api_client.py
+# player/api_client.py
+#
+# Native player API kliens – JWT nélkül, MAC alapú provisioning
+# Aktiválás után deviceKey-jel csatlakozik a WS-re (mint ESP32)
 
 import json
 import uuid
+import hashlib
 import platform
 import threading
 import urllib.request
 import urllib.error
 from pathlib import Path
 from typing  import Optional
-from config  import API_BASE, get_data_dir
 
-# ── Client ID (perzisztens) ────────────────────────────────────────────────────
-def get_or_create_client_id() -> str:
-    p = get_data_dir() / "client_id.txt"
-    if p.exists():
-        cid = p.read_text().strip()
-        if cid:
-            return cid
-    cid = str(uuid.uuid4())
-    p.write_text(cid)
-    return cid
+from config import API_BASE, get_data_dir
 
-CLIENT_ID = get_or_create_client_id()
+# ── Hardware ID (MAC cím alapú) ───────────────────────────────────────────────
+def get_hardware_id() -> str:
+    """
+    MAC cím alapú hardware ID.
+    Formátum: "aa:bb:cc:dd:ee:ff"
+    Ha nem sikerül lekérni, UUID alapú fallback (elmentve).
+    """
+    cache = get_data_dir() / "hardware_id.txt"
+    if cache.exists():
+        hid = cache.read_text().strip()
+        if hid:
+            return hid
 
-# ── Token tárolás ──────────────────────────────────────────────────────────────
-_token: Optional[str] = None
-_token_lock = threading.Lock()
+    # MAC cím lekérése
+    try:
+        mac_int = uuid.getnode()
+        # Ha az uuid.getnode() szoftveres MAC-et ad (multicast bit set), jelzés
+        if (mac_int >> 40) & 1:
+            raise ValueError("Multicast bit set – szoftveres MAC")
+        mac = ":".join(f"{(mac_int >> (8*i)) & 0xff:02x}" for i in range(5, -1, -1))
+    except Exception:
+        # Fallback: perzisztens UUID
+        mac = str(uuid.uuid4())
 
-def set_token(token: str) -> None:
-    global _token
-    with _token_lock:
-        _token = token
-    p = get_data_dir() / "token.txt"
-    p.write_text(token)
+    cache.write_text(mac)
+    return mac
 
-def get_token() -> Optional[str]:
-    global _token
-    with _token_lock:
-        if _token:
-            return _token
-    p = get_data_dir() / "token.txt"
-    if p.exists():
-        t = p.read_text().strip()
-        if t:
-            with _token_lock:
-                _token = t
-            return t
-    return None
+# ── Short ID (WP-XXXXXXXX) ────────────────────────────────────────────────────
+def get_short_id(hardware_id: str) -> str:
+    """MAC cím → determinisztikus WP-XXXXXXXX azonosító."""
+    h = hashlib.sha256(hardware_id.encode()).hexdigest()[:8].upper()
+    return f"WP-{h}"
 
-def clear_token() -> None:
-    global _token
-    with _token_lock:
-        _token = None
-    p = get_data_dir() / "token.txt"
-    if p.exists():
-        p.unlink()
+# ── Device Key (az eszköz titkos kulcsa) ─────────────────────────────────────
+def get_or_create_device_key() -> str:
+    """
+    Első indításkor random UUID generálás + mentés.
+    Ezzel a kulccsal csatlakozik a WS-re aktiválás után.
+    """
+    key_file = get_data_dir() / "device_key.txt"
+    if key_file.exists():
+        key = key_file.read_text().strip()
+        if key:
+            return key
+    key = str(uuid.uuid4())
+    key_file.write_text(key)
+    return key
+
+def get_device_key_hash(device_key: str) -> str:
+    """
+    bcrypt hash a device key-ből.
+    A backend ezt tárolja, a kliens a plain key-t.
+    """
+    try:
+        import bcrypt
+        return bcrypt.hashpw(device_key.encode(), bcrypt.gensalt()).decode()
+    except ImportError:
+        # Ha nincs bcrypt, sha256 fallback (kevésbé biztonságos)
+        return hashlib.sha256(device_key.encode()).hexdigest()
+
+# ── Singleton értékek ─────────────────────────────────────────────────────────
+HARDWARE_ID = get_hardware_id()
+SHORT_ID    = get_short_id(HARDWARE_ID)
+DEVICE_KEY  = get_or_create_device_key()
+CLIENT_ID   = SHORT_ID   # kompatibilitás a sync_client.py-val
 
 # ── HTTP helper ────────────────────────────────────────────────────────────────
 def _request(method: str, path: str, body: Optional[dict] = None,
-             timeout: int = 8) -> dict:
-    token = get_token()
+             timeout: int = 8, token: Optional[str] = None) -> dict:
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -74,84 +98,58 @@ def _request(method: str, path: str, body: Optional[dict] = None,
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"HTTP {e.code}: {e.reason}")
 
-# ── Auth ───────────────────────────────────────────────────────────────────────
-def login(email: str, password: str) -> dict:
-    resp = _request("POST", "/auth/login", {"email": email, "password": password})
-    if resp.get("accessToken"):
-        set_token(resp["accessToken"])
-        # Hitelesítő adatok mentése auto-reloginhoz
-        p = get_data_dir() / "credentials.json"
-        p.write_text(json.dumps({"email": email, "password": password}))
-    return resp
+# ── Native Player Provisioning ────────────────────────────────────────────────
 
-def relogin() -> bool:
-    p = get_data_dir() / "credentials.json"
-    if not p.exists():
-        return False
-    try:
-        creds = json.loads(p.read_text())
-        login(creds["email"], creds["password"])
-        return True
-    except Exception:
-        return False
+def provision() -> str:
+    """
+    Regisztrálja az eszközt a backenddel.
+    Visszatér: "active" vagy "pending"
+    
+    - Első hívásnál a backend létrehozza a pending rekordot
+    - Admin aktiválás után "active" lesz
+    """
+    device_key_hash = get_device_key_hash(DEVICE_KEY)
 
-def decode_token_payload() -> dict:
-    token = get_token()
-    if not token:
-        return {}
     try:
-        import base64
-        parts = token.split(".")
-        if len(parts) < 2:
-            return {}
-        pad  = parts[1] + "=" * (4 - len(parts[1]) % 4)
-        data = base64.urlsafe_b64decode(pad)
-        return json.loads(data)
-    except Exception:
-        return {}
-
-# ── Player regisztráció ────────────────────────────────────────────────────────
-def register_device() -> str:
-    """Visszatér: 'active' vagy 'pending'"""
-    try:
-        resp = _request("POST", "/player/device/register", {
-            "clientId":  CLIENT_ID,
-            "userAgent": f"SchoolLivePlayer/{platform.system()}/{platform.release()}",
+        resp = _request("POST", "/devices/native/provision", {
+            "hardwareId":    HARDWARE_ID,
+            "deviceKeyHash": device_key_hash,
+            "shortId":       SHORT_ID,
+            "platform":      platform.system().lower(),  # "windows" | "linux"
+            "version":       "1.0.0",
+            "userAgent":     f"{platform.system()} {platform.release()}",
         })
+        return resp.get("status", "pending")
+    except Exception as e:
+        print(f"[API] Provisioning hiba: {e}")
+        return "pending"
+
+def poll_status() -> str:
+    """Ellenőrzi hogy az eszköz aktív-e már."""
+    try:
+        resp = _request("GET", f"/devices/native/status/{HARDWARE_ID}")
         return resp.get("status", "pending")
     except Exception:
         return "pending"
 
-def poll_command() -> Optional[dict]:
-    """Poll egy parancsot, visszatér a command dict-tel vagy None-nal."""
+# ── Bell lekérés ──────────────────────────────────────────────────────────────
+def fetch_bells(device_key: str) -> list:
+    """
+    Csengetési rend lekérése – device key auth headerrel.
+    A backend az x-device-key headert fogadja el.
+    """
     try:
-        resp = _request("POST", "/player/device/poll", {})
-        if resp.get("status") == "active" and resp.get("command"):
-            return resp["command"]
-    except RuntimeError as e:
-        if "401" in str(e):
-            relogin()
-    except Exception:
-        pass
-    return None
-
-def ack_command(command_id: str) -> None:
-    try:
-        _request("POST", "/player/device/ack", {"commandId": command_id})
-    except Exception:
-        pass
-
-def beacon() -> None:
-    try:
-        _request("POST", "/player/device/beacon", {"clientId": CLIENT_ID})
-    except Exception:
-        pass
-
-def fetch_bells() -> list:
-    try:
-        resp = _request("GET", "/bells/today")
-        return resp.get("bells", [])
-    except Exception:
+        headers = {"Content-Type": "application/json", "x-device-key": device_key}
+        req = urllib.request.Request(
+            f"{API_BASE}/bells/today",
+            headers=headers,
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("bells", [])
+    except Exception as e:
+        print(f"[API] fetchBells hiba: {e}")
         return []
 
 def fetch_server_time() -> Optional[int]:

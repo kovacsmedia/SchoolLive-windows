@@ -3,3 +3,4 @@ websockets>=12.0
 pygame>=2.5.0
 PyQt6>=6.6.0
 pyinstaller>=6.0  # csak build-hez
+bcrypt>=4.0.0
