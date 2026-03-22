@@ -79,12 +79,15 @@ class SchoolLiveApp:
         # Első provision hívás
         status = api.provision()
 
+        # Provisioning képernyő röviden megjelenik (stack alapból ott van)
+        self.ui.show_pending()
+
         if status == "active":
+            print(f"[App] Már aktivált: {SHORT_ID}")
+            self.ui.hide_pending()
             self._activate()
             return
 
-        # Provisioning képernyő megjelenítése
-        self.ui.show_pending()
         print(f"[App] Provisioning mód: {SHORT_ID}")
 
         # Poll amíg aktív nem lesz

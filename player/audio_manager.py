@@ -88,18 +88,39 @@ def play_bell(sound_file: str, volume: float = 1.0,
 
     threading.Thread(target=_play, daemon=True).start()
 
-def play_url(url: str, volume: float = 1.0) -> None:
-    """TTS/rádió URL lejátszása (Snapcast fallback)."""
+def play_url(url: str, volume: float = 1.0, on_done: Optional[callable] = None) -> None:
+    """TTS/rádió URL lejátszása – letölti tempfájlba, majd pygame-mel lejátssza."""
     if not PYGAME_AVAILABLE:
+        if on_done:
+            on_done()
         return
 
     def _play():
+        import tempfile, os
+        tmp = None
         try:
-            pygame.mixer.music.load(url)
-            pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
-            pygame.mixer.music.play()
+            # Letöltés temp fájlba
+            suffix = ".mp3" if ".mp3" in url else ".wav" if ".wav" in url else ".mp3"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                tmp = f.name
+            urllib.request.urlretrieve(url, tmp)
+
+            with _lock:
+                pygame.mixer.music.load(tmp)
+                pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    pygame.time.wait(100)
         except Exception as e:
             print(f"[Audio] URL lejátszás hiba: {url}: {e}")
+        finally:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+            if on_done:
+                on_done()
 
     threading.Thread(target=_play, daemon=True).start()
 
