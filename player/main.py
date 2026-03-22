@@ -1,40 +1,76 @@
 #!/usr/bin/env python3
-# schoollive_player/main.py
+# player/main.py
 
-import tkinter as tk
 import sys
 import os
+import urllib.request
+import tempfile
 
-# Ha PyInstaller bundle-ból fut, az erőforrások a _MEIPASS-ban vannak
+# PyInstaller bundle esetén
 if getattr(sys, "frozen", False):
     os.chdir(os.path.dirname(sys.executable))
 
-from ui  import PlayerUI
-from app import SchoolLiveApp
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore    import Qt
+from PyQt6.QtGui     import QFontDatabase, QFont
+
+def load_fonts():
+    """Inter font betöltése – ha nincs lokálisan, letölti a Google Fonts-ról."""
+    db = QFontDatabase()
+
+    # Lokális font keresése
+    local_paths = [
+        os.path.join(os.path.dirname(__file__), "fonts", "Inter-Regular.ttf"),
+        os.path.join(os.path.dirname(__file__), "fonts", "Inter-Bold.ttf"),
+        os.path.join(os.path.dirname(__file__), "fonts", "Inter-Black.ttf"),
+    ]
+    found_local = any(os.path.exists(p) for p in local_paths)
+
+    if found_local:
+        for p in local_paths:
+            if os.path.exists(p):
+                db.addApplicationFont(p)
+        return "Inter"
+
+    # Fallback: rendszer fontok sorrendben
+    preferred = ["Inter", "Segoe UI", "SF Pro Display", "Helvetica Neue",
+                 "Ubuntu", "Roboto", "Arial"]
+    available = QFontDatabase.families()
+    for f in preferred:
+        if f in available:
+            return f
+    return "Arial"
 
 def main():
-    root = tk.Tk()
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
 
-    # DPI awareness Windows-on (éles szöveg HiDPI kijelzőn)
+    app = QApplication(sys.argv)
+    app.setApplicationName("SchoolLive Player")
+    app.setOrganizationName("SchoolLive")
+
+    # Betűtípus
+    font_family = load_fonts()
+    default_font = QFont(font_family, 13)
+    default_font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    app.setFont(default_font)
+
+    # Ikon
     try:
-        import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        from PyQt6.QtGui import QIcon
+        app.setWindowIcon(QIcon("schoollive.ico"))
     except Exception:
         pass
 
-    # Ikon beállítása ha van
-    try:
-        root.iconbitmap("schoollive.ico")
-    except Exception:
-        pass
+    from ui  import PlayerUI
+    from app import SchoolLiveApp
 
-    ui  = PlayerUI(root)
-    app = SchoolLiveApp(ui)
+    ui        = PlayerUI()
+    _app_ctrl = SchoolLiveApp(ui)
 
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        pass
+    ui.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()

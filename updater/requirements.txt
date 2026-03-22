@@ -1,5 +1,5 @@
 # requirements.txt
 websockets>=12.0
 pygame>=2.5.0
-requests>=2.31.0
-pyinstaller>=6.0  # csak build-hez, nem futásidőben szükséges
+PyQt6>=6.6.0
+pyinstaller>=6.0  # csak build-hez
