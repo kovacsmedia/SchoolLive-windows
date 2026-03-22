@@ -1,27 +1,33 @@
-# schoollive_player/audio_manager.py
+# player/audio_manager.py
 #
-# Offline bell fallback: ha a Snapcast szerver nem elérhető,
-# a csengetési hangokat lokálisan játssza le pygame-mel.
-# Hangfájlok cache-elve a data dir-ben.
+# Offline audio fallback: ha a Snapcast szerver nem elérhető,
+# a hangokat lokálisan játssza le pygame-mel.
+# Bell hangfájlok cache-elve a data dir-ben.
+# TTS/URL: letölti temp fájlba, lejátssza, törli.
 
 import os
 import threading
+import tempfile
 import urllib.request
-from pathlib  import Path
-from typing   import Optional
-from config   import API_BASE, get_data_dir
+from pathlib import Path
+from typing  import Optional
+from config  import API_BASE, get_data_dir
 
 try:
     import pygame
     pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
     PYGAME_AVAILABLE = True
-except Exception:
+    print("[Audio] pygame inicializálva")
+except Exception as e:
     PYGAME_AVAILABLE = False
+    print(f"[Audio] pygame nem elérhető: {e}")
 
 _cache_dir = get_data_dir() / "bells_cache"
 _cache_dir.mkdir(exist_ok=True)
 
 _lock = threading.Lock()
+
+# ── Bell cache ────────────────────────────────────────────────────────────────
 
 def _cache_path(sound_file: str) -> Path:
     return _cache_dir / sound_file
@@ -48,12 +54,11 @@ def prefetch_bells(bells: list) -> None:
             seen.add(sf)
             prefetch_bell(sf)
 
+# ── Bell lejátszás ────────────────────────────────────────────────────────────
+
 def play_bell(sound_file: str, volume: float = 1.0,
               on_done: Optional[callable] = None) -> None:
-    """
-    Lejátssza a bell hangfájlt pygame-mel.
-    on_done callback a lejátszás végén.
-    """
+    """Bell hangfájl lejátszása pygame-mel (cache-ből vagy letöltve)."""
     if not PYGAME_AVAILABLE:
         print(f"[Audio] pygame nem elérhető, bell kihagyva: {sound_file}")
         if on_done:
@@ -64,12 +69,11 @@ def play_bell(sound_file: str, volume: float = 1.0,
         with _lock:
             dest = _cache_path(sound_file)
             if not dest.exists():
-                # Szinkron letöltés (most kell)
                 try:
                     url = f"{API_BASE}/audio/bells/{sound_file}"
                     urllib.request.urlretrieve(url, dest)
                 except Exception as e:
-                    print(f"[Audio] Letöltés sikertelen: {sound_file}: {e}")
+                    print(f"[Audio] Bell letöltés sikertelen: {sound_file}: {e}")
                     if on_done:
                         on_done()
                     return
@@ -77,52 +81,75 @@ def play_bell(sound_file: str, volume: float = 1.0,
                 pygame.mixer.music.load(str(dest))
                 pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
                 pygame.mixer.music.play()
-                # Várakozás a lejátszás végéig
                 while pygame.mixer.music.get_busy():
                     pygame.time.wait(100)
             except Exception as e:
-                print(f"[Audio] Lejátszás hiba: {sound_file}: {e}")
+                print(f"[Audio] Bell lejátszás hiba: {sound_file}: {e}")
             finally:
                 if on_done:
                     on_done()
 
     threading.Thread(target=_play, daemon=True).start()
 
-def play_url(url: str, volume: float = 1.0, on_done: Optional[callable] = None) -> None:
-    """TTS/rádió URL lejátszása – letölti tempfájlba, majd pygame-mel lejátssza."""
+# ── URL lejátszás (TTS / rádió fallback) ──────────────────────────────────────
+
+def play_url(url: str, volume: float = 1.0,
+             on_done: Optional[callable] = None) -> None:
+    """
+    TTS vagy rádió URL lejátszása pygame-mel.
+    Letölti temp fájlba (pygame nem tud HTTPS URL-t közvetlenül tölteni),
+    lejátssza, majd törli a temp fájlt.
+    """
     if not PYGAME_AVAILABLE:
+        print(f"[Audio] pygame nem elérhető, URL kihagyva: {url[:60]}")
         if on_done:
             on_done()
         return
 
+    print(f"[Audio] play_url: {url[:80]}")
+
     def _play():
-        import tempfile, os
-        tmp = None
+        tmp_path = None
         try:
+            # Suffix meghatározása
+            if ".mp3" in url:
+                suffix = ".mp3"
+            elif ".wav" in url:
+                suffix = ".wav"
+            elif ".ogg" in url:
+                suffix = ".ogg"
+            else:
+                suffix = ".mp3"
+
             # Letöltés temp fájlba
-            suffix = ".mp3" if ".mp3" in url else ".wav" if ".wav" in url else ".mp3"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                tmp = f.name
-            urllib.request.urlretrieve(url, tmp)
+            fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+            os.close(fd)
+            print(f"[Audio] Letöltés: {url[:60]} → {tmp_path}")
+            urllib.request.urlretrieve(url, tmp_path)
+            print(f"[Audio] Letöltve, lejátszás indul")
 
             with _lock:
-                pygame.mixer.music.load(tmp)
+                pygame.mixer.music.load(tmp_path)
                 pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy():
                     pygame.time.wait(100)
+            print(f"[Audio] Lejátszás kész")
+
         except Exception as e:
-            print(f"[Audio] URL lejátszás hiba: {url}: {e}")
+            print(f"[Audio] play_url hiba: {e}")
         finally:
-            if tmp and os.path.exists(tmp):
+            if tmp_path and os.path.exists(tmp_path):
                 try:
-                    os.unlink(tmp)
+                    os.unlink(tmp_path)
                 except Exception:
                     pass
             if on_done:
                 on_done()
 
     threading.Thread(target=_play, daemon=True).start()
+
+# ── Stop ──────────────────────────────────────────────────────────────────────
 
 def stop() -> None:
     if PYGAME_AVAILABLE:
