@@ -110,7 +110,7 @@ class SyncClient:
             if not token:
                 await asyncio.sleep(2)
                 continue
-            url = f"{WS_URL}?token={token}"
+            url = f"{WS_URL}?token={token}&clientId={CLIENT_ID}"
             try:
                 async with websockets.connect(
                     url,

@@ -15,24 +15,16 @@ from PyQt6.QtCore    import Qt
 from PyQt6.QtGui     import QFontDatabase, QFont
 
 def load_fonts():
-    """Inter font betöltése – ha nincs lokálisan, letölti a Google Fonts-ról."""
-    db = QFontDatabase()
-
-    # Lokális font keresése
+    """Inter font betöltése – ha nincs lokálisan, rendszer fontot használ."""
     local_paths = [
         os.path.join(os.path.dirname(__file__), "fonts", "Inter-Regular.ttf"),
         os.path.join(os.path.dirname(__file__), "fonts", "Inter-Bold.ttf"),
         os.path.join(os.path.dirname(__file__), "fonts", "Inter-Black.ttf"),
     ]
-    found_local = any(os.path.exists(p) for p in local_paths)
+    for p in local_paths:
+        if os.path.exists(p):
+            QFontDatabase.addApplicationFont(p)
 
-    if found_local:
-        for p in local_paths:
-            if os.path.exists(p):
-                db.addApplicationFont(p)
-        return "Inter"
-
-    # Fallback: rendszer fontok sorrendben
     preferred = ["Inter", "Segoe UI", "SF Pro Display", "Helvetica Neue",
                  "Ubuntu", "Roboto", "Arial"]
     available = QFontDatabase.families()
