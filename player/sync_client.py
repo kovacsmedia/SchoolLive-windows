@@ -8,6 +8,7 @@ import time
 import asyncio
 import threading
 import urllib.request
+from api_client import SHORT_ID
 from typing   import Optional, Callable
 from config   import WS_URL, API_BASE
 
@@ -92,7 +93,7 @@ class SyncClient:
             msg = json.dumps({
                 "type":      "READY_ACK",
                 "commandId": command_id,
-                "deviceId":  CLIENT_ID,
+                "deviceId":  SHORT_ID,
                 "bufferMs":  buffer_ms,
                 "readyAt":   self._iso_now(),
             })
@@ -111,13 +112,8 @@ class SyncClient:
             if self._device_key:
                 url = f"{WS_URL}?deviceKey={self._device_key}"
             else:
-                # Fallback: token alapú (régi VP mód)
-                from api_client import get_token, CLIENT_ID
-                token = get_token()
-                if not token:
-                    await asyncio.sleep(2)
-                    continue
-                url = f"{WS_URL}?token={token}&clientId={CLIENT_ID}"
+                await asyncio.sleep(5)
+                continue
             try:
                 async with websockets.connect(
                     url,
