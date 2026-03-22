@@ -76,7 +76,7 @@ class SnapcastManager:
     def set_volume(self, volume: int) -> None:
         """0-100"""
         self._volume = max(0, min(100, volume))
-        # snapclient-nek nincs runtime volume API, újraindul az új értékkel
+        print(f"[Snapcast] set_volume: {self._volume}")
         if self._proc and self._proc.poll() is None:
             self._kill_proc()
 
@@ -124,6 +124,7 @@ class SnapcastManager:
                 "--logfilter", "error",
                 "--volume", str(self._volume),
             ]
+        print(f"[Snapcast] snapclient indítás, volume={self._volume}")
         # Windows: elrejti a konzolablakot
         kwargs = {}
         if platform.system() == "Windows":

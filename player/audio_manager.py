@@ -1,9 +1,4 @@
 # player/audio_manager.py
-#
-# Offline audio fallback: ha a Snapcast szerver nem elérhető,
-# a hangokat lokálisan játssza le pygame-mel.
-# Bell hangfájlok cache-elve a data dir-ben.
-# TTS/URL: letölti temp fájlba, lejátssza, törli.
 
 import os
 import threading
@@ -27,13 +22,17 @@ _cache_dir.mkdir(exist_ok=True)
 
 _lock = threading.Lock()
 
+# UI hangerő (0-10) → pygame hangerő (0.0-0.5)
+# Max 0.5 hogy ne torzítson – a rendszer hangerő adja a többit
+def _safe_vol(volume: float) -> float:
+    return max(0.0, min(0.5, volume * 0.5))
+
 # ── Bell cache ────────────────────────────────────────────────────────────────
 
 def _cache_path(sound_file: str) -> Path:
     return _cache_dir / sound_file
 
 def prefetch_bell(sound_file: str) -> None:
-    """Háttérben letölti és cache-eli a hangfájlt."""
     def _fetch():
         dest = _cache_path(sound_file)
         if dest.exists():
@@ -56,9 +55,8 @@ def prefetch_bells(bells: list) -> None:
 
 # ── Bell lejátszás ────────────────────────────────────────────────────────────
 
-def play_bell(sound_file: str, volume: float = 1.0,
+def play_bell(sound_file: str, volume: float = 0.7,
               on_done: Optional[callable] = None) -> None:
-    """Bell hangfájl lejátszása pygame-mel (cache-ből vagy letöltve)."""
     if not PYGAME_AVAILABLE:
         print(f"[Audio] pygame nem elérhető, bell kihagyva: {sound_file}")
         if on_done:
@@ -79,7 +77,7 @@ def play_bell(sound_file: str, volume: float = 1.0,
                     return
             try:
                 pygame.mixer.music.load(str(dest))
-                pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
+                pygame.mixer.music.set_volume(_safe_vol(volume))
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy():
                     pygame.time.wait(100)
@@ -93,13 +91,8 @@ def play_bell(sound_file: str, volume: float = 1.0,
 
 # ── URL lejátszás (TTS / rádió fallback) ──────────────────────────────────────
 
-def play_url(url: str, volume: float = 1.0,
+def play_url(url: str, volume: float = 0.7,
              on_done: Optional[callable] = None) -> None:
-    """
-    TTS vagy rádió URL lejátszása pygame-mel.
-    Letölti temp fájlba (pygame nem tud HTTPS URL-t közvetlenül tölteni),
-    lejátssza, majd törli a temp fájlt.
-    """
     if not PYGAME_AVAILABLE:
         print(f"[Audio] pygame nem elérhető, URL kihagyva: {url[:60]}")
         if on_done:
@@ -111,7 +104,6 @@ def play_url(url: str, volume: float = 1.0,
     def _play():
         tmp_path = None
         try:
-            # Suffix meghatározása
             if ".mp3" in url:
                 suffix = ".mp3"
             elif ".wav" in url:
@@ -121,7 +113,6 @@ def play_url(url: str, volume: float = 1.0,
             else:
                 suffix = ".mp3"
 
-            # Letöltés temp fájlba
             fd, tmp_path = tempfile.mkstemp(suffix=suffix)
             os.close(fd)
             print(f"[Audio] Letöltés: {url[:60]} → {tmp_path}")
@@ -130,7 +121,7 @@ def play_url(url: str, volume: float = 1.0,
 
             with _lock:
                 pygame.mixer.music.load(tmp_path)
-                pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
+                pygame.mixer.music.set_volume(_safe_vol(volume))
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy():
                     pygame.time.wait(100)

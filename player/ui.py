@@ -368,14 +368,14 @@ class PlayerUI(QMainWindow):
                 f"font-size: 96px; font-weight: 900; letter-spacing: -2px;"
             )
 
-        # Óra – monospace font hogy ne imbolyogjon
+        # Óra – Ubuntu Bold, tabular-nums
         self._lbl_clock = QLabel("00:00:00", content)
         self._lbl_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_clock.setStyleSheet(
-            f"color: {TEXT}; font-size: 120px; font-weight: 900;"
-            f"letter-spacing: -2px; background: transparent;"
+            f"color: {TEXT}; font-size: 180px; font-weight: 1200;"
+            f"letter-spacing: -3px; background: transparent;"
+            f"font-family: 'Ubuntu', 'Segoe UI', Arial, sans-serif;"
             f"font-variant-numeric: tabular-nums;"
-            f"font-family: 'Courier New', 'Consolas', monospace;"
         )
 
         # Dátum
@@ -427,7 +427,7 @@ class PlayerUI(QMainWindow):
             return
 
         # Logo – teljes content terület, középre
-        logo_size = min(w * 0.7, h * 0.6)
+        logo_size = min(w * 1.4, h * 1.2)
         lw = int(logo_size)
         lh = int(logo_size * 0.35)
         if self._logo_pixmap:
@@ -445,24 +445,24 @@ class PlayerUI(QMainWindow):
             (h - self._logo_label.height()) // 2,
         )
 
-        # Óra – horizontálisan középre, vertikálisan 38%-nál
-        self._lbl_clock.adjustSize()
-        cw = self._lbl_clock.sizeHint().width() + 20
-        ch = self._lbl_clock.sizeHint().height()
-        self._lbl_clock.setFixedSize(cw, ch)
-        clock_y = int(h * 0.33)
-        self._lbl_clock.move((w - cw) // 2, clock_y)
+        # Óra – FIX szélesség a "00:00:00" string alapján mérve
+        fm = self._lbl_clock.fontMetrics()
+        clock_w = fm.horizontalAdvance("00:00:00") + 20
+        clock_h = fm.height() + 20
+        self._lbl_clock.setFixedSize(clock_w, clock_h)
+        clock_y = int(h * 0.30)
+        self._lbl_clock.move((w - clock_w) // 2, clock_y)
 
         # Dátum – óra alatt
         self._lbl_date.adjustSize()
-        dw = self._lbl_date.sizeHint().width() + 20
+        dw = max(self._lbl_date.sizeHint().width() + 20, clock_w)
         dh = self._lbl_date.sizeHint().height()
         self._lbl_date.setFixedSize(dw, dh)
-        date_y = clock_y + ch + 8
+        date_y = clock_y + clock_h + 6
         self._lbl_date.move((w - dw) // 2, date_y)
 
         # Bell card – dátum alatt
-        bell_y = date_y + dh + 24
+        bell_y = date_y + dh + 20
         self._bell_card.move((w - self._bell_card.width()) // 2, bell_y)
 
     # ── Footer ──────────────────────────────────────────────────────────────────
