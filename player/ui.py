@@ -766,6 +766,9 @@ class PlayerUI(QMainWindow):
         self._prog_bar.set_colors(GREEN, BLUE)
         self._prog_bar.show()
         self._prog_timer.start()
+        # Auto-dismiss a reading time lejárta után
+        if total_ms > 0:
+            QTimer.singleShot(total_ms, self._do_hide_overlay)
 
     def _update_progress(self):
         if self._prog_total <= 0:

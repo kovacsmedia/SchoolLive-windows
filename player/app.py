@@ -170,6 +170,9 @@ class SchoolLiveApp:
         url         = prepare.get("url")
         snap_active = prepare.get("snap_active", False)
 
+        # Ha snap_active=True de snapclient nincs telepítve → lokális fallback
+        snap_usable = snap_active and self._snap.available and self._snap.connected
+
         def _execute():
             if delay_ms > 50:
                 time.sleep(delay_ms / 1000)
@@ -177,17 +180,17 @@ class SchoolLiveApp:
             if action == "TTS" and prepare.get("text"):
                 reading_ms = self._calc_reading_ms(prepare["text"])
                 self.ui.show_message_overlay(prepare["text"], reading_ms)
-                if not snap_active and url:
+                if not snap_usable and url:
                     audio.play_url(url, self._volume / 10)
 
             elif action == "PLAY_URL":
                 self.ui.show_radio_overlay(prepare.get("title", "Iskolarádió"))
-                if not snap_active and url:
+                if not snap_usable and url:
                     audio.play_url(url, self._volume / 10)
 
             elif action == "BELL":
                 self.ui.show_bell_banner(True)
-                if not snap_active and url:
+                if not snap_usable and url:
                     sound_file = url.split("/")[-1]
                     audio.play_bell(sound_file, self._volume / 10,
                                     on_done=lambda: self.ui.show_bell_banner(False))
@@ -200,6 +203,7 @@ class SchoolLiveApp:
     def _on_immediate(self, msg: dict) -> None:
         action      = msg.get("action", "")
         snap_active = msg.get("snapcastActive", False)
+        snap_usable = snap_active and self._snap.available and self._snap.connected
 
         if action == "BELL":
             url = msg.get("url", "")
@@ -209,7 +213,7 @@ class SchoolLiveApp:
                 return
             self._last_bell_key = key
             self.ui.show_bell_banner(True)
-            if not snap_active and url:
+            if not snap_usable and url:
                 sound_file = url.split("/")[-1]
                 audio.play_bell(sound_file, self._volume / 10,
                                 on_done=lambda: self.ui.show_bell_banner(False))
@@ -222,14 +226,14 @@ class SchoolLiveApp:
             if text:
                 reading_ms = self._calc_reading_ms(text)
                 self.ui.show_message_overlay(text, reading_ms)
-                if not snap_active and url:
+                if not snap_usable and url:
                     audio.play_url(url, self._volume / 10)
 
         elif action == "PLAY_URL":
             title = msg.get("title", "Iskolarádió")
             url   = msg.get("url")
             self.ui.show_radio_overlay(title)
-            if not snap_active and url:
+            if not snap_usable and url:
                 audio.play_url(url, self._volume / 10)
 
         elif action == "STOP_PLAYBACK":
