@@ -712,9 +712,31 @@ class PlayerUI(QMainWindow):
         self._prog_bar.set_colors(GREEN, BLUE)
         self._prog_bar.show()
         self._prog_timer.start()
-        # Auto-dismiss a reading time lejárta után
+        # Auto-dismiss animációval
         if total_ms > 0:
-            QTimer.singleShot(total_ms, self._do_hide_overlay)
+            QTimer.singleShot(total_ms, self._start_dismiss_animation)
+
+    def _start_dismiss_animation(self):
+        """Narancs csík visszafelé fut, majd overlay eltűnik."""
+        if not self._overlay_visible:
+            return
+        self._prog_timer.stop()
+        self._prog_bar.set_colors(AMBER, RED)
+        self._prog_bar.set_pct(1.0)
+        self._dismiss_step = 0
+        self._dismiss_timer = QTimer()
+        self._dismiss_timer.setInterval(16)  # ~60fps
+        self._dismiss_timer.timeout.connect(self._dismiss_tick)
+        self._dismiss_timer.start()
+
+    def _dismiss_tick(self):
+        self._dismiss_step += 1
+        total_steps = 20  # ~330ms animáció
+        pct = max(0.0, 1.0 - self._dismiss_step / total_steps)
+        self._prog_bar.set_pct(pct)
+        if pct <= 0:
+            self._dismiss_timer.stop()
+            self._do_hide_overlay()
 
     def _update_progress(self):
         if self._prog_total <= 0:
