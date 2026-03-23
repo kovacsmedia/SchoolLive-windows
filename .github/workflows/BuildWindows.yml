@@ -1,13 +1,18 @@
-# .github/workflows/build-windows.yml
+# .github/workflows/BuildWindows.yml
 #
 # Automatikus Windows installer build minden release tagnél (v*.*.*)
 # és manuálisan is indítható (workflow_dispatch).
 #
-# Kimenet:
-#   - dist/SchoolLivePlayer.exe       (standalone binary)
-#   - installer/SchoolLiveSetup.exe   (Inno Setup telepítő)
+# Repo struktúra:
+#   player/         – Python forrás (main.py, app.py, ui.py stb.)
+#   player/fonts/   – betűkészletek
+#   installer/      – setup.iss (Inno Setup script)
+#   schoollive-logo.png – logó a gyökérben
+#   Requirements.txt    – pip függőségek
 #
-# A release-hez automatikusan feltölti mindkét fájlt.
+# Kimenet:
+#   dist/SchoolLivePlayer.exe     – standalone binary
+#   installer/SchoolLiveSetup.exe – Inno Setup telepítő
 
 name: Build Windows Installer
 
@@ -31,8 +36,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Python ────────────────────────────────────────────────────────────
-      - name: Python 3.11 setup
+      # ── 2. Python 3.11 ───────────────────────────────────────────────────────
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -41,7 +46,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r Requirements.txt
           pip install pyinstaller
 
       # ── 4. Verzió meghatározás ───────────────────────────────────────────────
@@ -59,22 +64,22 @@ jobs:
           echo "Building version: $VERSION"
 
       # ── 5. PyInstaller build ─────────────────────────────────────────────────
+      # main.py a player/ mappában van
       - name: Build executable
         run: |
           pyinstaller `
             --onefile `
             --windowed `
             --name SchoolLivePlayer `
-            --icon assets/icon.ico `
-            --add-data "assets;assets" `
             --add-data "schoollive-logo.png;." `
+            --add-data "player/fonts;fonts" `
+            --paths "player" `
             --hidden-import PyQt6.sip `
             --hidden-import bcrypt `
-            main.py
-        # Ha nincs icon.ico vagy logo, vedd ki a --icon és --add-data sorokat
+            player/main.py
 
-      # ── 6. Inno Setup telepítő ───────────────────────────────────────────────
-      - name: Download Inno Setup
+      # ── 6. Inno Setup letöltés és build ──────────────────────────────────────
+      - name: Download and install Inno Setup
         run: |
           $url = "https://files.jrsoftware.org/is/6/innosetup-6.3.3.exe"
           Invoke-WebRequest -Uri $url -OutFile innosetup.exe
@@ -88,7 +93,7 @@ jobs:
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/setup.iss
         shell: powershell
 
-      # ── 7. Artifacts feltöltése ──────────────────────────────────────────────
+      # ── 7. Artifacts ─────────────────────────────────────────────────────────
       - name: Upload standalone exe
         uses: actions/upload-artifact@v4
         with:
@@ -101,7 +106,7 @@ jobs:
           name: SchoolLivePlayer-${{ steps.version.outputs.VERSION }}-setup
           path: installer/SchoolLiveSetup.exe
 
-      # ── 8. GitHub Release létrehozása (csak tagnél) ──────────────────────────
+      # ── 8. GitHub Release (csak tagnél) ──────────────────────────────────────
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
@@ -119,7 +124,8 @@ jobs:
             - **SchoolLiveSetup.exe** – ajánlott, telepítővarázslóval
             - **SchoolLivePlayer.exe** – standalone, telepítés nélkül futtatható
 
-            ### Változások
-            Lásd a commit history-t.
+            ### Követelmények
+            - Windows 10 vagy újabb (64 bit)
+            - Internetkapcsolat a SchoolLive szerverhez
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
