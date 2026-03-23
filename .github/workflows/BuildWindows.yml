@@ -79,11 +79,8 @@ jobs:
             player/main.py
 
       # ── 6. Inno Setup letöltés és build ──────────────────────────────────────
-      - name: Download and install Inno Setup
-        run: |
-          $url = "https://files.jrsoftware.org/is/6/innosetup-6.3.3.exe"
-          Invoke-WebRequest -Uri $url -OutFile innosetup.exe
-          Start-Process -FilePath innosetup.exe -Args "/VERYSILENT /SUPPRESSMSGBOXES" -Wait
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
         shell: powershell
 
       - name: Build installer
@@ -129,3 +126,4 @@ jobs:
             - Internetkapcsolat a SchoolLive szerverhez
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
