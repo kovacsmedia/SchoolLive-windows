@@ -1,58 +1,115 @@
 ; installer/setup.iss
-; Inno Setup 6+ szükséges: https://jrsoftware.org/isinfo.php
+; Inno Setup script – SchoolLive Player Windows telepítő
+;
+; Fordítás: ISCC.exe setup.iss
+; Kimenet: SchoolLiveSetup.exe
 
-#define MyAppName "SchoolLive Player"
-#define MyAppVersion "1.0.0"
+#define MyAppName      "SchoolLive Player"
+#define MyAppVersion   GetEnv("APP_VERSION")
 #define MyAppPublisher "SchoolLive"
-#define MyAppURL "https://schoollive.hu"
-#define MyAppExeName "SchoolLivePlayer.exe"
-#define MyUpdaterExeName "SchoolLiveUpdater.exe"
+#define MyAppURL       "https://schoollive.hu"
+#define MyAppExeName   "SchoolLivePlayer.exe"
+#define MyAppDataDir   "{userappdata}\SchoolLive"
 
 [Setup]
-AppId={{B7E4C2A1-3F8D-4E5B-9A2C-1D6F0E3B7C8A}
+AppId={{8A3F2C1D-4B5E-4F6A-9C0D-1E2F3A4B5C6D}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\SchoolLive Player
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-OutputDir=..\dist\installer
-OutputBaseFilename=SchoolLivePlayer_Setup_{#MyAppVersion}
-Compression=lzma
+; Kimenet
+OutputDir=.
+OutputBaseFilename=SchoolLiveSetup
+; Tömörítés
+Compression=lzma2/ultra64
 SolidCompression=yes
+; 64 bites
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+; Megjelenés
 WizardStyle=modern
+WizardSizePercent=120
+; UAC – nem kell admin a felhasználói mappába telepítéshez
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+; Minimum Windows 10
+MinVersion=10.0.17763
+; Uninstaller ikon
 UninstallDisplayIcon={app}\{#MyAppExeName}
-CloseApplications=yes
+UninstallDisplayName={#MyAppName}
 
 [Languages]
 Name: "hungarian"; MessagesFile: "compiler:Languages\Hungarian.isl"
 Name: "english";   MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon";    Description: "Asztali parancsikon";    GroupDescription: "További ikonok:"
-Name: "startupentry";   Description: "Indítás Windows induláskor"; GroupDescription: "Automatikus indítás:"
+Name: "desktopicon";    Description: "Ikon létrehozása az {cm:DesktopName} felületen"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "startupicon";    Description: "Automatikus indítás Windows induláskor";          GroupDescription: "Indítási beállítások"; Flags: unchecked
 
 [Files]
-Source: "..\dist\{#MyAppExeName}";     DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\{#MyUpdaterExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; Fő bináris
+Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+
+; Assets (ha vannak)
+Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists('..\assets')
 
 [Icons]
-Name: "{group}\{#MyAppName}";          Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}";    Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+; Start menü
+Name: "{group}\{#MyAppName}";           Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#MyAppName} eltávolítása"; Filename: "{uninstallexe}"
 
-[Registry]
-; Windows induláskor automatikus indítás (opcionális)
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run";
-  ValueType: string; ValueName: "SchoolLivePlayer";
-  ValueData: """{app}\{#MyAppExeName}""";
-  Flags: uninsdeletevalue; Tasks: startupentry
+; Asztal ikon (opcionális)
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+; Startup (opcionális)
+Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startupicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "SchoolLive Player indítása"; Flags: nowait postinstall skipifsilent
+; Telepítés után indítás (opcionális)
+Filename: "{app}\{#MyAppExeName}"; \
+  Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; \
+  Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}"
+; Törli az adatkönyvtárat is eltávolításkor (device_key.txt stb.)
+; FIGYELEM: ez törli a provisioning adatokat is!
+; Ha meg akarod tartani, vedd ki ezt a szekciót.
+Type: filesandordirs; Name: "{#MyAppDataDir}"
+
+[Code]
+// Startup regisztrációja registry-be (Tasks: startupicon esetén)
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    if WizardIsTaskSelected('startupicon') then begin
+      RegWriteStringValue(
+        HKCU,
+        'SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+        '{#MyAppName}',
+        ExpandConstant('"{app}\{#MyAppExeName}"')
+      );
+    end else begin
+      RegDeleteValue(
+        HKCU,
+        'SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+        '{#MyAppName}'
+      );
+    end;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then begin
+    RegDeleteValue(
+      HKCU,
+      'SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+      '{#MyAppName}'
+    );
+  end;
+end;
