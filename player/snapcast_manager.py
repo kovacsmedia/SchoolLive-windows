@@ -13,6 +13,17 @@ from config import API_BASE, get_snapclient_bin
 
 
 def _get_snapserver_host() -> str:
+    """
+    Snapserver host meghatározása.
+    Ha a gép és a szerver ugyanazon a LAN-on van, a belső IP-t használjuk
+    (NAT hairpinning elkerülése – sok router nem forwardolja vissza a saját
+    külső IP-re érkező kérést a belső hálózatról).
+    SNAP_SERVER_HOST env változóval felülírható (pl. "192.168.1.232").
+    """
+    import os
+    override = os.environ.get("SNAP_SERVER_HOST")
+    if override:
+        return override
     host = API_BASE.replace("https://", "").replace("http://", "").split("/")[0]
     return host
 
