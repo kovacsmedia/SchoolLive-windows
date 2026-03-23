@@ -2,6 +2,12 @@
 #
 # Native player API kliens – JWT nélkül, MAC alapú provisioning
 # Aktiválás után deviceKey-jel csatlakozik a WS-re (mint ESP32)
+#
+# Változások:
+#   • fetch_snap_port(device_key) – tenant snapserver port lekérése (pl. 1801)
+#   • get_device_id(device_key)   – saját eszköz UUID lekérése (targeting-hez)
+#   • save_device_id / get_cached_device_id – lokális cache
+#   • Dead code eltávolítva a fetch_tenant_name végéről
 
 import json
 import uuid
@@ -28,15 +34,12 @@ def get_hardware_id() -> str:
         if hid:
             return hid
 
-    # MAC cím lekérése
     try:
         mac_int = uuid.getnode()
-        # Ha az uuid.getnode() szoftveres MAC-et ad (multicast bit set), jelzés
         if (mac_int >> 40) & 1:
             raise ValueError("Multicast bit set – szoftveres MAC")
         mac = ":".join(f"{(mac_int >> (8*i)) & 0xff:02x}" for i in range(5, -1, -1))
     except Exception:
-        # Fallback: perzisztens UUID
         mac = str(uuid.uuid4())
 
     cache.write_text(mac)
@@ -48,7 +51,7 @@ def get_short_id(hardware_id: str) -> str:
     h = hashlib.sha256(hardware_id.encode()).hexdigest()[:8].upper()
     return f"WP-{h}"
 
-# ── Device Key (az eszköz titkos kulcsa) ─────────────────────────────────────
+# ── Device Key ────────────────────────────────────────────────────────────────
 def get_or_create_device_key() -> str:
     """
     Első indításkor random UUID generálás + mentés.
@@ -64,15 +67,11 @@ def get_or_create_device_key() -> str:
     return key
 
 def get_device_key_hash(device_key: str) -> str:
-    """
-    bcrypt hash a device key-ből.
-    A backend ezt tárolja, a kliens a plain key-t.
-    """
+    """bcrypt hash, fallback sha256 ha nincs bcrypt."""
     try:
         import bcrypt
         return bcrypt.hashpw(device_key.encode(), bcrypt.gensalt()).decode()
     except ImportError:
-        # Ha nincs bcrypt, sha256 fallback (kevésbé biztonságos)
         return hashlib.sha256(device_key.encode()).hexdigest()
 
 # ── Singleton értékek ─────────────────────────────────────────────────────────
@@ -81,12 +80,12 @@ SHORT_ID    = get_short_id(HARDWARE_ID)
 DEVICE_KEY  = get_or_create_device_key()
 CLIENT_ID   = SHORT_ID   # kompatibilitás a sync_client.py-val
 
-# ── HTTP helper ────────────────────────────────────────────────────────────────
+# ── HTTP helper ───────────────────────────────────────────────────────────────
 def _request(method: str, path: str, body: Optional[dict] = None,
-             timeout: int = 8, token: Optional[str] = None) -> dict:
+             timeout: int = 8, device_key: Optional[str] = None) -> dict:
     headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if device_key:
+        headers["x-device-key"] = device_key
 
     data = json.dumps(body).encode() if body is not None else None
     req  = urllib.request.Request(
@@ -99,59 +98,117 @@ def _request(method: str, path: str, body: Optional[dict] = None,
         raise RuntimeError(f"HTTP {e.code}: {e.reason}")
 
 # ── Native Player Provisioning ────────────────────────────────────────────────
-
 def provision() -> str:
     """
     Regisztrálja az eszközt a backenddel.
     Visszatér: "active" vagy "pending"
-    
-    - Első hívásnál a backend létrehozza a pending rekordot
-    - Admin aktiválás után "active" lesz
     """
     device_key_hash = get_device_key_hash(DEVICE_KEY)
-
     try:
         resp = _request("POST", "/devices/native/provision", {
             "hardwareId":    HARDWARE_ID,
             "deviceKeyHash": device_key_hash,
             "shortId":       SHORT_ID,
-            "platform":      platform.system().lower(),  # "windows" | "linux"
+            "platform":      platform.system().lower(),
             "version":       "1.0.0",
             "userAgent":     f"{platform.system()} {platform.release()}",
         })
+        # Ha a backend visszaadja a device UUID-t, mentsük el
+        device_id = resp.get("deviceId")
+        if device_id:
+            save_device_id(device_id)
         return resp.get("status", "pending")
     except Exception as e:
         print(f"[API] Provisioning hiba: {e}")
         return "pending"
 
+def poll_status() -> str:
+    """Ellenőrzi hogy az eszköz aktív-e már."""
+    try:
+        resp = _request("GET", f"/devices/native/status/{HARDWARE_ID}")
+        # Státusz ellenőrzéskor is elmentjük a device ID-t ha megérkezett
+        device_id = resp.get("deviceId")
+        if device_id:
+            save_device_id(device_id)
+        return resp.get("status", "pending")
+    except Exception:
+        return "pending"
+
+# ── Device ID cache (targeting-hez) ──────────────────────────────────────────
 def get_cached_device_id() -> Optional[str]:
+    """Lokálisan cachelt device UUID visszaadása."""
     p = get_data_dir() / "device_id.txt"
     if p.exists():
         return p.read_text().strip() or None
     return None
 
 def save_device_id(device_id: str) -> None:
+    """Device UUID mentése lokálisan."""
     (get_data_dir() / "device_id.txt").write_text(device_id)
 
-def poll_status() -> str:
-    """Ellenőrzi hogy az eszköz aktív-e már."""
+def get_device_id(device_key: str) -> Optional[str]:
+    """
+    Saját eszköz UUID lekérése a backendről (targeting-hez).
+    Először a lokális cache-t nézi, ha nincs → /devices/native/info lekérdezés.
+    Az UUID-t a backend az aktiváláskor rendeli az eszközhöz.
+    """
+    # Lokális cache elsőbbsége (provision / poll_status már elmenthette)
+    cached = get_cached_device_id()
+    if cached:
+        return cached
+
+    # Backend lekérés: /devices/native/info visszaadja a deviceId-t is
     try:
-        resp = _request("GET", f"/devices/native/status/{HARDWARE_ID}")
-        return resp.get("status", "pending")
-    except Exception:
-        return "pending"
+        req = urllib.request.Request(
+            f"{API_BASE}/devices/native/info",
+            headers={"x-device-key": device_key},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            device_id = data.get("deviceId")
+            if device_id:
+                save_device_id(device_id)
+                print(f"[API] Device ID lekérve: {device_id}")
+            return device_id
+    except Exception as e:
+        print(f"[API] get_device_id hiba: {e}")
+        return None
+
+# ── Snap port lekérése ────────────────────────────────────────────────────────
+def fetch_snap_port(device_key: str) -> Optional[int]:
+    """
+    Tenant-specifikus Snapcast szerver port lekérése.
+    Pl. Demo suli → 1801, Ilosvai → 1800, Bárczay → 1802.
+    Endpoint: GET /devices/native/snap-port
+    Header: x-device-key
+    """
+    try:
+        req = urllib.request.Request(
+            f"{API_BASE}/devices/native/snap-port",
+            headers={"x-device-key": device_key},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            port = data.get("snapPort")
+            if port:
+                print(f"[API] Snap port: {port}")
+                return int(port)
+            print("[API] Snap port hiányzik a válaszból")
+            return None
+    except Exception as e:
+        print(f"[API] fetch_snap_port hiba: {e}")
+        return None
 
 # ── Bell lekérés ──────────────────────────────────────────────────────────────
 def fetch_bells(device_key: str) -> list:
-    """
-    Csengetési rend lekérése – device key auth headerrel.
-    A backend az x-device-key headert fogadja el.
-    """
+    """Csengetési rend lekérése – device key auth headerrel."""
     try:
-        headers = {"Content-Type": "application/json", "x-device-key": device_key}
         req = urllib.request.Request(
             f"{API_BASE}/bells/today",
-            headers=headers,
+            headers={"Content-Type": "application/json",
+                     "x-device-key": device_key},
             method="GET",
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -161,6 +218,7 @@ def fetch_bells(device_key: str) -> list:
         print(f"[API] fetchBells hiba: {e}")
         return []
 
+# ── Tenant info ───────────────────────────────────────────────────────────────
 def fetch_tenant_name(device_key: str) -> Optional[str]:
     """Visszaadja az intézmény nevét device key alapján."""
     try:
@@ -171,13 +229,11 @@ def fetch_tenant_name(device_key: str) -> Optional[str]:
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
+            # Device ID-t is mentsük ha visszajön
+            device_id = data.get("deviceId")
+            if device_id:
+                save_device_id(device_id)
             return data.get("tenantName")
     except Exception as e:
         print(f"[API] fetch_tenant_name hiba: {e}")
-        return None
-    """Unix ms"""
-    try:
-        resp = _request("GET", "/time")
-        return resp.get("now")
-    except Exception:
         return None

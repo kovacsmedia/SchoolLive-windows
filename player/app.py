@@ -1,17 +1,16 @@
 # player/app.py
-#
-# Főalkalmazás – native provisioning flow:
-#   1. provision() → pending vagy active
-#   2. Ha pending: provisioning képernyő (WP-XXXXXXXX mutatva)
-#   3. Poll amíg active nem lesz
-#   4. Active → deviceKey-jel WS csatlakozás (mint ESP32, JWT nélkül)
+# Változások:
+#   • _activate(): api.fetch_snap_port() → snap.set_port() (tenant-specifikus port)
+#   • _on_prepare(): targetDeviceIds ellenőrzés → snap.mute(True/False)
+#   • _on_immediate(): STOP_PLAYBACK → snap.mute(False) + snap.restart()
+#   • _device_id tárolás az aktiváláskor (targeting ID-hoz)
 
 import time
 import threading
 import datetime
 from typing import Optional
 
-import api_client   as api
+import api_client    as api
 import audio_manager as audio
 from api_client       import DEVICE_KEY, SHORT_ID, HARDWARE_ID
 from config           import load_settings, save_settings
@@ -23,43 +22,45 @@ from ui               import PlayerUI
 BEACON_INTERVAL_S = 30
 POLL_INTERVAL_S   = 5
 
+
 class SchoolLiveApp:
     def __init__(self, ui: PlayerUI):
-        self.ui         = ui
-        self._settings  = load_settings()
-        self._bells:    list = []
-        self._status    = "provisioning"   # provisioning | active
-        self._online    = False
+        self.ui        = ui
+        self._settings = load_settings()
+        self._bells:   list = []
+        self._status   = "provisioning"
+        self._online   = False
         self._last_bell_key = ""
 
-        # Snapcast manager
+        # Az eszköz UUID-je (backend adja vissza aktiváláskor / beacon válaszban)
+        # A targeting összehasonlításhoz használjuk
+        self._device_id: Optional[str] = None
+
+        # Snap (némítás állapota targeting alapján)
+        self._snap_muted = False
+
         self._snap = SnapcastManager(
             on_connected    = self._on_snap_connected,
             on_disconnected = self._on_snap_disconnected,
             on_error        = self._on_snap_error,
         )
 
-        # WS SyncCast kliens – deviceKey-jel csatlakozik (mint ESP32)
         self._ws = SyncClient(
             on_prepare      = self._on_prepare,
             on_play         = self._on_play,
             on_immediate    = self._on_immediate,
             on_connected    = self._on_ws_connected,
             on_disconnected = self._on_ws_disconnected,
-            device_key      = DEVICE_KEY,   # JWT helyett device key
+            device_key      = DEVICE_KEY,
         )
 
-        # Pending PREPARE-ok
         self._pending: dict = {}
 
-        # UI callbacks
         ui.on_volume_change = self._handle_volume
-
         self._volume = self._settings.get("volume", 7)
         ui.set_volume_display(self._volume)
         self._handle_volume(self._volume)
 
-        # Auto-updater
         self._updater = AutoUpdater(
             on_update_available = self._on_update_available,
             on_downloading      = self._on_update_downloading,
@@ -67,19 +68,14 @@ class SchoolLiveApp:
             on_error            = lambda e: print(f"[Update] {e}"),
         )
 
-        # Indítás
         self._boot()
 
-    # ── Boot – provisioning flow ───────────────────────────────────────────────
+    # ── Boot ──────────────────────────────────────────────────────────────────
     def _boot(self) -> None:
         threading.Thread(target=self._provision_loop, daemon=True).start()
 
     def _provision_loop(self) -> None:
-        """Provision és poll amíg active nem lesz."""
-        # Első provision hívás
         status = api.provision()
-
-        # Provisioning képernyő röviden megjelenik (stack alapból ott van)
         self.ui.show_pending()
 
         if status == "active":
@@ -89,8 +85,6 @@ class SchoolLiveApp:
             return
 
         print(f"[App] Provisioning mód: {SHORT_ID}")
-
-        # Poll amíg aktív nem lesz
         while True:
             time.sleep(POLL_INTERVAL_S)
             status = api.poll_status()
@@ -98,42 +92,58 @@ class SchoolLiveApp:
                 self.ui.hide_pending()
                 self._activate()
                 return
-            # Provision hívás megismétlése (frissíti a lastSeenAt-t és a keyHash-t)
             api.provision()
 
-    # ── Aktiválás ──────────────────────────────────────────────────────────────
+    # ── Aktiválás ─────────────────────────────────────────────────────────────
     def _activate(self) -> None:
         print(f"[App] Aktiválva: {SHORT_ID}")
         self._status = "active"
 
-        # Intézmény neve a backendről
-        def _fetch_name():
+        def _fetch_info():
+            # Tenant neve
             name = api.fetch_tenant_name(DEVICE_KEY)
             if name:
                 self.ui.set_institution(name)
-        threading.Thread(target=_fetch_name, daemon=True).start()
 
-        # Snapcast indítás
-        if self._snap.available:
-            self._snap.start()
-            self.ui.set_snap_status("⏳ Snapcast csatlakozás...")
-        else:
-            self.ui.set_snap_status("⚠ snapclient nem found")
+            # ── Snap port lekérése a backendről ──────────────────────────────
+            # A snapserver tenant-specifikus porton fut (pl. Demo suli: 1801)
+            snap_port = api.fetch_snap_port(DEVICE_KEY)
+            if snap_port:
+                print(f"[App] Snap port: {snap_port}")
+                self._snap.set_port(snap_port)
+            else:
+                print("[App] ⚠ Snap port lekérés sikertelen, alapértelmezett 1704")
 
-        # WS SyncCast csatlakozás
+            # Snapcast indítás (port már be van állítva)
+            if self._snap.available:
+                self._snap.start()
+                self.ui.set_snap_status("⏳ Snapcast csatlakozás...")
+            else:
+                self.ui.set_snap_status("⚠ snapclient nem found")
+
+        threading.Thread(target=_fetch_info, daemon=True).start()
+
+        # Device ID lekérése a targetinghez
+        # Ha az api_client-ben elérhető, itt tároljuk
+        try:
+            self._device_id = api.get_device_id(DEVICE_KEY)
+            print(f"[App] Device ID: {self._device_id}")
+        except AttributeError:
+            # Ha nincs get_device_id(), HARDWARE_ID-t használunk fallbackként
+            self._device_id = HARDWARE_ID
+            print(f"[App] Device ID (HARDWARE_ID fallback): {self._device_id}")
+
+        # WS SyncCast
         self._ws.start()
 
-        # Csengetési rend
-        threading.Thread(target=self._sync_bells, daemon=True).start()
-
         # Háttér taskok
+        threading.Thread(target=self._sync_bells,  daemon=True).start()
         threading.Thread(target=self._bell_tick_loop, daemon=True).start()
-        threading.Thread(target=self._beacon_loop,    daemon=True).start()
+        threading.Thread(target=self._beacon_loop, daemon=True).start()
 
-        # Auto-updater
         self._updater.start()
 
-    # ── Snapcast callbacks ─────────────────────────────────────────────────────
+    # ── Snap callbacks ────────────────────────────────────────────────────────
     def _on_snap_connected(self) -> None:
         self.ui.set_snap_status("🔊 Snapcast csatlakozva")
 
@@ -152,21 +162,42 @@ class SchoolLiveApp:
         self._online = False
         self.ui.set_online(False)
 
-    # ── SyncCast PREPARE ──────────────────────────────────────────────────────
+    # ── PREPARE ───────────────────────────────────────────────────────────────
     def _on_prepare(self, msg: dict) -> None:
         command_id  = msg.get("commandId", "")
         action      = msg.get("action", "")
         url         = msg.get("url")
         snap_active = msg.get("snapcastActive", False)
 
+        # ── Eszközönkénti célzás: targetDeviceIds ──────────────────────────
+        # Ha a lista létezik és a saját eszköz nincs benne → mute
+        target_ids = msg.get("targetDeviceIds")
+        if target_ids is not None and isinstance(target_ids, list):
+            is_targeted = (self._device_id in target_ids) if self._device_id else True
+            if not is_targeted and not self._snap_muted:
+                print(f"[App] Eszköz nem célzott → snap mute ON")
+                self._snap_muted = True
+                self._snap.mute(True)
+            elif is_targeted and self._snap_muted:
+                print(f"[App] Eszköz célzott → snap mute OFF")
+                self._snap_muted = False
+                self._snap.mute(False)
+        else:
+            # Nincs targetDeviceIds → mindenki szól → unmute ha volt
+            if self._snap_muted:
+                self._snap_muted = False
+                self._snap.mute(False)
+
         self._pending[command_id] = {
-            "action": action, "url": url,
-            "text": msg.get("text"), "title": msg.get("title"),
+            "action":      action,
+            "url":         url,
+            "text":        msg.get("text"),
+            "title":       msg.get("title"),
             "snap_active": snap_active,
         }
         self._ws.send_ack(command_id, 0)
 
-    # ── SyncCast PLAY ─────────────────────────────────────────────────────────
+    # ── PLAY ──────────────────────────────────────────────────────────────────
     def _on_play(self, msg: dict) -> None:
         command_id = msg.get("commandId", "")
         play_at_ms = msg.get("playAtMs")
@@ -174,10 +205,9 @@ class SchoolLiveApp:
         if not prepare:
             return
 
-        server_now  = self._ws.clock.server_now_ms()
-        delay_ms    = max(0, (play_at_ms or 0) - server_now) if play_at_ms else 0
+        server_now = self._ws.clock.server_now_ms()
+        delay_ms   = max(0, (play_at_ms or 0) - server_now) if play_at_ms else 0
 
-        # Minden adatot kimásolunk – nincs closure hivatkozás
         ctx = {
             "action":      prepare.get("action", ""),
             "url":         prepare.get("url"),
@@ -187,13 +217,13 @@ class SchoolLiveApp:
                 prepare.get("snap_active", False)
                 and self._snap.available
                 and self._snap.connected
+                and not self._snap_muted    # ← mute esetén fallbackre esünk
             ),
             "volume":      self._volume,
             "delay_ms":    delay_ms,
         }
 
         def _execute(ctx=ctx):
-            print(f"[Debug] snap_usable={ctx['snap_usable']} available={self._snap.available} connected={self._snap.connected}")
             if ctx["delay_ms"] > 50:
                 time.sleep(ctx["delay_ms"] / 1000)
 
@@ -202,7 +232,8 @@ class SchoolLiveApp:
             snap_usable = ctx["snap_usable"]
             volume      = ctx["volume"]
 
-            print(f"[Debug] PLAY action={action} snap_usable={snap_usable} url={str(url)[:60]}")
+            print(f"[App] PLAY action={action} snap_usable={snap_usable} "
+                  f"muted={self._snap_muted}")
 
             if action == "TTS" and ctx["text"]:
                 reading_ms = self._calc_reading_ms(ctx["text"])
@@ -226,11 +257,16 @@ class SchoolLiveApp:
 
         threading.Thread(target=_execute, daemon=True).start()
 
-    # ── Azonnali broadcast parancsok ──────────────────────────────────────────
+    # ── Azonnali broadcast ────────────────────────────────────────────────────
     def _on_immediate(self, msg: dict) -> None:
         action      = msg.get("action", "")
         snap_active = msg.get("snapcastActive", False)
-        snap_usable = snap_active and self._snap.available and self._snap.connected
+        snap_usable = (
+            snap_active
+            and self._snap.available
+            and self._snap.connected
+            and not self._snap_muted
+        )
 
         if action == "BELL":
             url = msg.get("url", "")
@@ -267,11 +303,17 @@ class SchoolLiveApp:
             audio.stop()
             self.ui.hide_overlay()
             self.ui.show_bell_banner(False)
+            # ── Targeting reset: STOP_PLAYBACK után mindenki unmute ────────
+            if self._snap_muted:
+                print("[App] STOP_PLAYBACK → snap unmute + restart")
+                self._snap_muted = False
+                self._snap.mute(False)
+                self._snap.restart()
 
         elif action == "SYNC_BELLS":
             threading.Thread(target=self._sync_bells, daemon=True).start()
 
-    # ── Csengetési rend ────────────────────────────────────────────────────────
+    # ── Csengetési rend ───────────────────────────────────────────────────────
     def _sync_bells(self) -> None:
         bells = api.fetch_bells(DEVICE_KEY)
         if bells:
@@ -284,7 +326,6 @@ class SchoolLiveApp:
 
     # ── Beacon loop ───────────────────────────────────────────────────────────
     def _beacon_loop(self) -> None:
-        """30 másodpercenként jelzi a backendnek hogy az eszköz online."""
         while True:
             try:
                 import urllib.request, json
@@ -304,6 +345,7 @@ class SchoolLiveApp:
             except Exception:
                 pass
             time.sleep(BEACON_INTERVAL_S)
+
     def _bell_tick_loop(self) -> None:
         while True:
             time.sleep(5)
@@ -318,11 +360,10 @@ class SchoolLiveApp:
             due = next(
                 (b for b in self._bells
                  if b["hour"] == now.hour and b["minute"] == now.minute),
-                None
+                None,
             )
             if not due:
                 continue
-            # Offline bell: csak ha nincs WS kapcsolat
             if not self._online:
                 self._last_bell_key = key
                 self.ui.show_bell_banner(True)
@@ -338,7 +379,7 @@ class SchoolLiveApp:
         self._settings["volume"] = vol
         save_settings(self._settings)
 
-    # ── Auto-update callbacks ──────────────────────────────────────────────────
+    # ── Auto-update callbacks ─────────────────────────────────────────────────
     def _on_update_available(self, tag: str) -> None:
         self.ui.show_update_banner(f"Új verzió érhető el: {tag} – letöltés...")
 
@@ -354,7 +395,6 @@ class SchoolLiveApp:
     def _install_update(self) -> None:
         self._updater.install_now()
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
     @staticmethod
     def _calc_reading_ms(text: str) -> int:
         chars = len(text.strip())
