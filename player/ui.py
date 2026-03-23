@@ -1,7 +1,15 @@
 # player/ui.py
 # SchoolLive Player – PyQt6 modern material dark UI
+#
+# Változások:
+#   • PulsingLine widget – narancs (AMBER) pulzáló vonal az animációhoz
+#   • Rádió overlay: ProgressBar → PulsingLine, AMBER/narancssárga szín
+#   • Rádió overlay: dismiss (×) gomb – STOP_PLAYBACK nélkül is bezárható
+#   • _do_hide_overlay: PulsingLine timer leállítása
+#   • Rádió cím: az átadott title-t írja ki (app.py mindig "Iskolarádió"-t ad)
 
 import time
+import math
 import datetime
 from typing import Optional, Callable
 
@@ -33,6 +41,7 @@ BLUE_GLOW   = "rgba(59,130,246,0.15)"
 GREEN       = "#22c55e"
 RED         = "#ef4444"
 AMBER       = "#f59e0b"
+ORANGE      = "#f97316"
 PURPLE      = "#6366f1"
 
 # ── Global stylesheet ──────────────────────────────────────────────────────────
@@ -99,7 +108,6 @@ QFrame#updateBanner {{
 
 # ── Segéd: thread-safe UI híd ─────────────────────────────────────────────────
 class UIBridge(QObject):
-    """Signals a háttérszálakból a Qt main thread-be."""
     set_online_signal          = pyqtSignal(bool)
     set_snap_signal            = pyqtSignal(str)
     set_institution_signal     = pyqtSignal(str)
@@ -117,14 +125,10 @@ class UIBridge(QObject):
     set_login_error_signal     = pyqtSignal(str)
     set_volume_display_signal  = pyqtSignal(int)
 
-# ── Egyedi widgetek ────────────────────────────────────────────────────────────
-class GlowLabel(QLabel):
-    """Nagy óra szöveg kék glow-val."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
+# ── Egyedi widgetek ────────────────────────────────────────────────────────────
 class ProgressBar(QWidget):
-    """Egyedi gradient progress sáv."""
+    """Gradient progress sáv – üzenet olvasási időhöz."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pct = 0.0
@@ -144,19 +148,51 @@ class ProgressBar(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w = self.width()
-        h = self.height()
-        # Track
+        w, h = self.width(), self.height()
         p.setBrush(QBrush(QColor(BORDER)))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(0, 0, w, h, h//2, h//2)
-        # Fill
         if self._pct > 0:
             grad = QLinearGradient(0, 0, w, 0)
             grad.setColorAt(0, self._color1)
             grad.setColorAt(1, self._color2)
             p.setBrush(QBrush(grad))
             p.drawRoundedRect(0, 0, int(w * self._pct), h, h//2, h//2)
+
+
+class PulsingLine(QWidget):
+    """
+    Rádió lejátszás animáció – teljes szélességű narancs vonal,
+    opacity sin()-alapú pulzálással (0.25 – 1.0).
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._opacity  = 1.0
+        self._color    = QColor(AMBER)
+        self._color2   = QColor(ORANGE)
+        self.setFixedHeight(6)
+
+    def set_opacity(self, opacity: float):
+        self._opacity = max(0.0, min(1.0, opacity))
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        # Track (halvány alap)
+        bg = QColor(BORDER)
+        p.setBrush(QBrush(bg))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(0, 0, w, h, h//2, h//2)
+        # Pulzáló teli vonal
+        grad = QLinearGradient(0, 0, w, 0)
+        c1 = QColor(self._color);  c1.setAlphaF(self._opacity)
+        c2 = QColor(self._color2); c2.setAlphaF(self._opacity)
+        grad.setColorAt(0, c1)
+        grad.setColorAt(1, c2)
+        p.setBrush(QBrush(grad))
+        p.drawRoundedRect(0, 0, w, h, h//2, h//2)
 
 
 class StatusDot(QWidget):
@@ -176,10 +212,8 @@ class StatusDot(QWidget):
         p.setBrush(QBrush(color))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawEllipse(0, 0, 12, 12)
-        # Glow
         if self._online:
-            glow = QColor(GREEN)
-            glow.setAlpha(60)
+            glow = QColor(GREEN); glow.setAlpha(60)
             p.setBrush(QBrush(glow))
             p.drawEllipse(-3, -3, 18, 18)
 
@@ -198,12 +232,14 @@ class PlayerUI(QMainWindow):
         self.on_volume_change: Optional[Callable] = None
         self._dismiss_step    = 0
         self._dismiss_timer:  Optional[QTimer] = None
+        self._radio_pulse_timer: Optional[QTimer] = None
+        self._radio_pulse_step  = 0
 
         self._setup_window()
         self._build_ui()
         self._start_clock()
 
-    # ── Bridge kapcsolatok ─────────────────────────────────────────────────────
+    # ── Bridge ─────────────────────────────────────────────────────────────────
     def _connect_bridge(self):
         b = self._bridge
         b.set_online_signal.connect(self._do_set_online)
@@ -237,7 +273,7 @@ class PlayerUI(QMainWindow):
         self._root_layout.setContentsMargins(0, 0, 0, 0)
         self._root_layout.setSpacing(0)
 
-        # Update banner (legfelül, rejtve)
+        # Update banner
         self._update_banner = QFrame()
         self._update_banner.setObjectName("updateBanner")
         self._update_banner.setFixedHeight(40)
@@ -246,8 +282,7 @@ class PlayerUI(QMainWindow):
         self._lbl_update = QLabel("")
         self._lbl_update.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_update.setStyleSheet(
-            f"color: white; font-size: 13px; font-weight: 600;"
-            f"background: transparent; cursor: pointer;"
+            "color: white; font-size: 13px; font-weight: 600; background: transparent;"
         )
         self._lbl_update.mousePressEvent = self._on_update_click
         _ub_layout.addWidget(self._lbl_update)
@@ -269,22 +304,17 @@ class PlayerUI(QMainWindow):
         self._bell_banner.hide()
         self._root_layout.addWidget(self._bell_banner)
 
-        # Header
         self._root_layout.addWidget(self._build_header())
 
-        # Stacked: main / pending
         self._stack = QStackedWidget()
         self._root_layout.addWidget(self._stack)
 
         self._main_widget    = self._build_main()
         self._pending_widget = self._build_pending()
-
         self._stack.addWidget(self._main_widget)    # 0
         self._stack.addWidget(self._pending_widget) # 1
+        self._stack.setCurrentIndex(1)
 
-        self._stack.setCurrentIndex(1)  # provisioning képernyő először
-
-        # Overlay (a main_widget felett, abszolút pozíció)
         self._overlay = self._build_overlay()
         self._overlay.hide()
 
@@ -296,7 +326,6 @@ class PlayerUI(QMainWindow):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(28, 0, 28, 0)
 
-        # Brand + intézmény
         left = QVBoxLayout()
         left.setSpacing(2)
         brand = QLabel("SchoolLive")
@@ -308,16 +337,16 @@ class PlayerUI(QMainWindow):
         layout.addLayout(left)
         layout.addStretch()
 
-        # Snap státusz
         self._lbl_snap = QLabel("")
         self._lbl_snap.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
         layout.addWidget(self._lbl_snap)
         layout.addSpacing(16)
 
-        # Online dot + label
         self._dot = StatusDot()
         self._lbl_status = QLabel("Offline")
-        self._lbl_status.setStyleSheet(f"color: {TEXT_DIM}; font-size: 12px; font-weight: 700;")
+        self._lbl_status.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 12px; font-weight: 700;"
+        )
         layout.addWidget(self._dot)
         layout.addSpacing(6)
         layout.addWidget(self._lbl_status)
@@ -326,41 +355,31 @@ class PlayerUI(QMainWindow):
 
     # ── Main képernyő ──────────────────────────────────────────────────────────
     def _build_main(self) -> QWidget:
-        # Külső wrapper: header + content + footer vertikálisan
         outer = QWidget()
         outer.setStyleSheet(f"background: {BG};")
         outer_layout = QVBoxLayout(outer)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
-        # Content area – relatív pozicionáláshoz QWidget kell
         content = QWidget()
         content.setStyleSheet(f"background: {BG};")
         outer_layout.addWidget(content, stretch=1)
         outer_layout.addWidget(self._build_footer())
 
-        # Logo watermark – abszolút, content mögött
         self._logo_label = QLabel(content)
         self._logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._logo_label.setStyleSheet("background: transparent;")
-        # SVG/PNG logo betöltése ha van, egyébként szöveges placeholder
         try:
             from PyQt6.QtGui import QPixmap
             pix = QPixmap("schoollive-logo.png")
-            if not pix.isNull():
-                self._logo_pixmap = pix
-            else:
-                self._logo_pixmap = None
+            self._logo_pixmap = pix if not pix.isNull() else None
         except Exception:
             self._logo_pixmap = None
 
-        # Opacity effect a logo-ra
-        from PyQt6.QtWidgets import QGraphicsOpacityEffect
         logo_opacity = QGraphicsOpacityEffect()
         logo_opacity.setOpacity(0.10)
         self._logo_label.setGraphicsEffect(logo_opacity)
 
-        # Ha nincs kép, szöveges logo
         if self._logo_pixmap is None:
             self._logo_label.setText("SchoolLive")
             self._logo_label.setStyleSheet(
@@ -368,7 +387,6 @@ class PlayerUI(QMainWindow):
                 f"font-size: 96px; font-weight: 900; letter-spacing: -2px;"
             )
 
-        # Óra – Ubuntu Bold, tabular-nums
         self._lbl_clock = QLabel("00:00:00", content)
         self._lbl_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_clock.setStyleSheet(
@@ -378,15 +396,12 @@ class PlayerUI(QMainWindow):
             f"font-variant-numeric: tabular-nums;"
         )
 
-        # Dátum
         self._lbl_date = QLabel("", content)
         self._lbl_date.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_date.setStyleSheet(
-            f"color: {TEXT_MUTED}; font-size: 22px; font-weight: 600;"
-            f"background: transparent;"
+            f"color: {TEXT_MUTED}; font-size: 22px; font-weight: 600; background: transparent;"
         )
 
-        # Következő csengetés kártya
         self._bell_card = QFrame(content)
         self._bell_card.setObjectName("card")
         self._bell_card.setFixedSize(380, 64)
@@ -395,9 +410,7 @@ class PlayerUI(QMainWindow):
         bell_icon = QLabel("🔔")
         bell_icon.setStyleSheet("font-size: 22px; background: transparent;")
         bell_label = QLabel("Következő csengetés:")
-        bell_label.setStyleSheet(
-            f"color: {TEXT_MUTED}; font-size: 13px; font-weight: 600;"
-        )
+        bell_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px; font-weight: 600;")
         self._lbl_next_bell = QLabel("--:--")
         self._lbl_next_bell.setStyleSheet(
             f"color: {TEXT}; font-size: 22px; font-weight: 800;"
@@ -409,16 +422,12 @@ class PlayerUI(QMainWindow):
         bell_layout.addWidget(self._lbl_next_bell)
         self._bell_card.hide()
 
-        # Tároljuk a content widgetet a resizeEvent-hez
         self._main_content = content
-
-        # Első elhelyezés
         self._layout_main_content()
 
         return outer
 
     def _layout_main_content(self):
-        """Abszolút pozicionálás – mindig a content közepére igazít."""
         if not hasattr(self, "_main_content"):
             return
         w = self._main_content.width()
@@ -426,15 +435,15 @@ class PlayerUI(QMainWindow):
         if w == 0 or h == 0:
             return
 
-        # Logo – teljes content terület, középre
         logo_size = min(w * 1.4, h * 1.2)
         lw = int(logo_size)
         lh = int(logo_size * 0.35)
         if self._logo_pixmap:
+            from PyQt6.QtCore import Qt as _Qt
             scaled = self._logo_pixmap.scaled(
                 lw, lh,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+                _Qt.AspectRatioMode.KeepAspectRatio,
+                _Qt.TransformationMode.SmoothTransformation,
             )
             self._logo_label.setPixmap(scaled)
             self._logo_label.setFixedSize(scaled.width(), scaled.height())
@@ -445,7 +454,6 @@ class PlayerUI(QMainWindow):
             (h - self._logo_label.height()) // 2,
         )
 
-        # Óra – FIX szélesség a "00:00:00" string alapján mérve
         fm = self._lbl_clock.fontMetrics()
         clock_w = fm.horizontalAdvance("00:00:00") + 20
         clock_h = fm.height() + 20
@@ -453,7 +461,6 @@ class PlayerUI(QMainWindow):
         clock_y = int(h * 0.30)
         self._lbl_clock.move((w - clock_w) // 2, clock_y)
 
-        # Dátum – óra alatt
         self._lbl_date.adjustSize()
         dw = max(self._lbl_date.sizeHint().width() + 20, clock_w)
         dh = self._lbl_date.sizeHint().height()
@@ -461,11 +468,10 @@ class PlayerUI(QMainWindow):
         date_y = clock_y + clock_h + 6
         self._lbl_date.move((w - dw) // 2, date_y)
 
-        # Bell card – dátum alatt
         bell_y = date_y + dh + 20
         self._bell_card.move((w - self._bell_card.width()) // 2, bell_y)
 
-    # ── Footer ──────────────────────────────────────────────────────────────────
+    # ── Footer ─────────────────────────────────────────────────────────────────
     def _build_footer(self) -> QWidget:
         frame = QFrame()
         frame.setStyleSheet(f"background: {BG2}; border-top: 1px solid {BORDER};")
@@ -483,7 +489,6 @@ class PlayerUI(QMainWindow):
         layout.addWidget(self._lbl_cache)
         layout.addStretch()
 
-        # Hangerő
         vol_frame = QHBoxLayout()
         vol_frame.setSpacing(4)
         lbl_speaker = QLabel("🔈")
@@ -509,23 +514,14 @@ class PlayerUI(QMainWindow):
         lbl_speaker2 = QLabel("🔊")
         lbl_speaker2.setStyleSheet("font-size: 14px;")
 
-        for w in [lbl_speaker, self._btn_vol_down, self._lbl_vol,
-                  self._btn_vol_up, lbl_speaker2]:
-            vol_frame.addWidget(w)
+        for ww in [lbl_speaker, self._btn_vol_down, self._lbl_vol,
+                   self._btn_vol_up, lbl_speaker2]:
+            vol_frame.addWidget(ww)
         layout.addLayout(vol_frame)
 
         return frame
 
-    # ── Login overlay – ELTÁVOLÍTVA (native player: hardver ID alapú provisioning) ──
-    def _build_login(self) -> QWidget:
-        # Nem használt – megtartva a kompatibilitás miatt
-        w = QWidget()
-        return w
-
-    def _do_login(self):
-        pass  # nem használt
-
-    # ── Pending overlay ────────────────────────────────────────────────────────
+    # ── Pending ────────────────────────────────────────────────────────────────
     def _build_pending(self) -> QWidget:
         w = QWidget()
         w.setStyleSheet(f"background: {BG};")
@@ -577,7 +573,7 @@ class PlayerUI(QMainWindow):
 
         return w
 
-    # ── Overlay (üzenet / rádió) ───────────────────────────────────────────────
+    # ── Overlay ────────────────────────────────────────────────────────────────
     def _build_overlay(self) -> QWidget:
         w = QWidget(self.centralWidget())
         w.setStyleSheet(f"background: rgba(7,16,31,0.96);")
@@ -586,6 +582,7 @@ class PlayerUI(QMainWindow):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setSpacing(16)
 
+        # ── Üzenet widgetek ───────────────────────────────────────────────────
         self._lbl_msg_text = QLabel("")
         self._lbl_msg_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_msg_text.setWordWrap(True)
@@ -598,7 +595,7 @@ class PlayerUI(QMainWindow):
         self._prog_bar.setFixedWidth(500)
         layout.addWidget(self._prog_bar, 0, Qt.AlignmentFlag.AlignCenter)
 
-        # Rádió widgetek
+        # ── Rádió widgetek ────────────────────────────────────────────────────
         self._lbl_radio_icon = QLabel("📻")
         self._lbl_radio_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_radio_icon.setStyleSheet("font-size: 64px;")
@@ -607,27 +604,31 @@ class PlayerUI(QMainWindow):
         self._lbl_radio_title = QLabel("Iskolarádió")
         self._lbl_radio_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_radio_title.setStyleSheet(
-            f"color: {BLUE}; font-size: 48px; font-weight: 900;"
+            f"color: {AMBER}; font-size: 48px; font-weight: 900;"
         )
         layout.addWidget(self._lbl_radio_title)
 
-        self._lbl_radio_time = QLabel("")
-        self._lbl_radio_time.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_radio_time.setStyleSheet(
-            f"color: {TEXT_MUTED}; font-size: 22px; font-weight: 600;"
+        # Pulzáló narancs vonal (ProgressBar helyett)
+        self._pulsing_line = PulsingLine()
+        self._pulsing_line.setFixedWidth(500)
+        layout.addWidget(self._pulsing_line, 0, Qt.AlignmentFlag.AlignCenter)
+
+        # Dismiss gomb (rádió overlay bezárásához, ha STOP_PLAYBACK nem jönne)
+        self._btn_dismiss = QPushButton("×  Bezárás")
+        self._btn_dismiss.setFixedSize(160, 40)
+        self._btn_dismiss.setStyleSheet(
+            f"background: transparent; color: {TEXT_DIM}; border: 1px solid {BORDER};"
+            f"border-radius: 10px; font-size: 14px; padding: 0;"
         )
-        layout.addWidget(self._lbl_radio_time)
+        self._btn_dismiss.clicked.connect(self._do_hide_overlay)
+        layout.addWidget(self._btn_dismiss, 0, Qt.AlignmentFlag.AlignCenter)
 
-        self._radio_prog = ProgressBar()
-        self._radio_prog.setFixedWidth(500)
-        layout.addWidget(self._radio_prog, 0, Qt.AlignmentFlag.AlignCenter)
-
-        # Progress timer
+        # Üzenet progress timer
         self._prog_timer = QTimer()
         self._prog_timer.setInterval(100)
         self._prog_timer.timeout.connect(self._update_progress)
-        self._prog_start  = 0.0
-        self._prog_total  = 0.0
+        self._prog_start = 0.0
+        self._prog_total = 0.0
 
         return w
 
@@ -637,7 +638,6 @@ class PlayerUI(QMainWindow):
             cw = self.centralWidget()
             if cw:
                 self._overlay.setGeometry(0, 0, cw.width(), cw.height())
-        # Main content újrarendezés méretváltozáskor
         if hasattr(self, "_main_content"):
             self._main_content.update()
             QTimer.singleShot(0, self._layout_main_content)
@@ -661,7 +661,6 @@ class PlayerUI(QMainWindow):
             except Exception:
                 pass
             self._lbl_date.setText(now.strftime("%Y. %B %d., %A").capitalize())
-        # Pozicionálás frissítése (első néhány tick-nél a widget mérete még 0)
         if hasattr(self, "_main_content") and self._main_content.width() > 0:
             self._layout_main_content()
         self._refresh_next_bell()
@@ -679,22 +678,6 @@ class PlayerUI(QMainWindow):
         else:
             self._bell_card.hide()
 
-    # ── Login ──────────────────────────────────────────────────────────────────
-    def _do_login(self):
-        email = self._entry_email.text().strip()
-        pwd   = self._entry_pass.text()
-        if not email or not pwd:
-            self._lbl_login_err.setText("Email és jelszó kötelező")
-            return
-        self._btn_login.setEnabled(False)
-        self._btn_login.setText("...")
-        self._lbl_login_err.setText("")
-        if self.on_login:
-            import threading
-            threading.Thread(
-                target=self.on_login, args=(email, pwd), daemon=True
-            ).start()
-
     # ── Hangerő ────────────────────────────────────────────────────────────────
     def _vol_up(self):
         self._volume = min(10, self._volume + 1)
@@ -708,7 +691,7 @@ class PlayerUI(QMainWindow):
         if self.on_volume_change:
             self.on_volume_change(self._volume)
 
-    # ── Progress animáció ──────────────────────────────────────────────────────
+    # ── Üzenet progress animáció ───────────────────────────────────────────────
     def _start_progress(self, total_ms: int):
         self._prog_start = time.monotonic()
         self._prog_total = total_ms / 1000
@@ -716,12 +699,10 @@ class PlayerUI(QMainWindow):
         self._prog_bar.set_colors(GREEN, BLUE)
         self._prog_bar.show()
         self._prog_timer.start()
-        # Auto-dismiss animációval
         if total_ms > 0:
             QTimer.singleShot(total_ms, self._start_dismiss_animation)
 
     def _start_dismiss_animation(self):
-        """Narancs csík visszafelé fut, majd overlay eltűnik."""
         if not self._overlay_visible:
             return
         self._prog_timer.stop()
@@ -736,7 +717,7 @@ class PlayerUI(QMainWindow):
 
     def _dismiss_tick(self):
         self._dismiss_step += 1
-        total_steps = 20  # ~330ms animáció
+        total_steps = 20
         pct = max(0.0, 1.0 - self._dismiss_step / total_steps)
         self._prog_bar.set_pct(pct)
         if pct <= 0:
@@ -752,16 +733,32 @@ class PlayerUI(QMainWindow):
         if pct >= 1.0:
             self._prog_timer.stop()
 
+    # ── Rádió pulzáló animáció ────────────────────────────────────────────────
+    def _start_radio_pulse(self):
+        """Narancs vonal pulzálása – opacity sin() alapján (0.25–1.0)."""
+        self._radio_pulse_step = 0
+        if self._radio_pulse_timer is None:
+            self._radio_pulse_timer = QTimer(self)
+            self._radio_pulse_timer.setInterval(40)   # ~25fps
+            self._radio_pulse_timer.timeout.connect(self._radio_pulse_tick)
+        self._radio_pulse_timer.start()
+
+    def _radio_pulse_tick(self):
+        self._radio_pulse_step += 1
+        # Lassú, kellemes pulzálás: ~2s periódus
+        opacity = 0.25 + 0.75 * (math.sin(self._radio_pulse_step * 0.065) + 1) / 2
+        self._pulsing_line.set_opacity(opacity)
+
     # ── Update banner kattintás ────────────────────────────────────────────────
     def _on_update_click(self, event):
         if self._update_click_cb:
             self._update_click_cb()
 
-    # ── Keyboard shortcut ──────────────────────────────────────────────────────
+    # ── Keyboard ───────────────────────────────────────────────────────────────
     def keyPressEvent(self, event):
         from PyQt6.QtCore import Qt as QtCore
         key = event.key()
-        if key == QtCore.Key.Key_Escape or key == QtCore.Key.Key_F11:
+        if key in (QtCore.Key.Key_Escape, QtCore.Key.Key_F11):
             if self.isFullScreen():
                 self.showNormal()
             else:
@@ -774,7 +771,7 @@ class PlayerUI(QMainWindow):
             self._vol_down()
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Publikus thread-safe API (background threadekből hívható)
+    # Thread-safe publikus API
     # ══════════════════════════════════════════════════════════════════════════
 
     def set_online(self, online: bool):
@@ -828,7 +825,6 @@ class PlayerUI(QMainWindow):
 
     def update_radio_time(self, seconds_left: int):
         m, s = divmod(max(0, seconds_left), 60)
-        self._lbl_radio_time.setText(f"{m}:{s:02d}")
 
     # ══════════════════════════════════════════════════════════════════════════
     # Slot implementációk (Qt main thread)
@@ -864,12 +860,14 @@ class PlayerUI(QMainWindow):
         # Rádió widgetek elrejtése
         self._lbl_radio_icon.hide()
         self._lbl_radio_title.hide()
-        self._lbl_radio_time.hide()
-        self._radio_prog.hide()
+        self._pulsing_line.hide()
+        self._btn_dismiss.hide()
+        if self._radio_pulse_timer:
+            self._radio_pulse_timer.stop()
 
-        # Betűméret a szöveg hosszától
+        # Üzenet widgetek
         l = len(text.strip())
-        if l <= 40:    size = 52
+        if   l <= 40:  size = 52
         elif l <= 80:  size = 38
         elif l <= 160: size = 28
         else:          size = 21
@@ -879,9 +877,9 @@ class PlayerUI(QMainWindow):
         )
         self._lbl_msg_text.setText(text)
         self._lbl_msg_text.show()
-
         self._prog_bar.show()
         self._overlay_visible = True
+
         if reading_ms > 0:
             self._start_progress(reading_ms)
 
@@ -892,25 +890,26 @@ class PlayerUI(QMainWindow):
             self._overlay.setGeometry(0, 0, cw.width(), cw.height())
 
     def _do_show_radio_overlay(self, title: str):
+        # Üzenet widgetek elrejtése
         self._lbl_msg_text.hide()
         self._prog_bar.hide()
         self._prog_timer.stop()
+        if self._dismiss_timer:
+            self._dismiss_timer.stop()
 
+        # Rádió widgetek – cím AMBER színnel
         self._lbl_radio_icon.show()
-        self._lbl_radio_title.setText(title)
+        self._lbl_radio_title.setText(title)   # app.py mindig "Iskolarádió"-t ad
+        self._lbl_radio_title.setStyleSheet(
+            f"color: {AMBER}; font-size: 48px; font-weight: 900;"
+        )
         self._lbl_radio_title.show()
-        self._lbl_radio_time.show()
-        self._radio_prog.show()
+        self._pulsing_line.show()
+        self._btn_dismiss.show()
         self._overlay_visible = True
 
-        # Pulsing progress animáció (nem tudjuk a végét)
-        self._radio_prog.set_colors(BLUE, PURPLE)
-        self._radio_prog.set_pct(0.0)
-        self._radio_pulse_step = 0
-        self._radio_pulse_timer = QTimer(self)
-        self._radio_pulse_timer.setInterval(50)
-        self._radio_pulse_timer.timeout.connect(self._radio_pulse_tick)
-        self._radio_pulse_timer.start()
+        # Narancs pulzáló animáció indítása
+        self._start_radio_pulse()
 
         self._overlay.show()
         self._overlay.raise_()
@@ -918,17 +917,12 @@ class PlayerUI(QMainWindow):
         if cw:
             self._overlay.setGeometry(0, 0, cw.width(), cw.height())
 
-    def _radio_pulse_tick(self):
-        self._radio_pulse_step += 1
-        import math
-        pct = (math.sin(self._radio_pulse_step * 0.08) + 1) / 2
-        self._radio_prog.set_pct(pct)
-
     def _do_hide_overlay(self):
+        # Minden timer leállítása
         self._prog_timer.stop()
         if self._dismiss_timer:
             self._dismiss_timer.stop()
-        if hasattr(self, "_radio_pulse_timer") and self._radio_pulse_timer:
+        if self._radio_pulse_timer:
             self._radio_pulse_timer.stop()
         self._overlay_visible = False
         self._overlay.hide()
@@ -938,7 +932,7 @@ class PlayerUI(QMainWindow):
         self._update_banner.show()
 
     def _do_show_login(self):
-        pass  # nincs login a native playerben
+        pass
 
     def _do_hide_login(self):
         pass
@@ -950,7 +944,7 @@ class PlayerUI(QMainWindow):
         self._stack.setCurrentIndex(0)
 
     def _do_set_login_error(self, msg: str):
-        pass  # nincs login
+        pass
 
     def _do_set_volume(self, vol: int):
         self._volume = vol
