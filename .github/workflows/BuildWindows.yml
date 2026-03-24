@@ -1,19 +1,4 @@
 # .github/workflows/BuildWindows.yml
-#
-# Automatikus Windows installer build minden release tagnél (v*.*.*)
-# és manuálisan is indítható (workflow_dispatch).
-#
-# Repo struktúra:
-#   player/         – Python forrás (main.py, app.py, ui.py stb.)
-#   player/fonts/   – betűkészletek
-#   installer/      – setup.iss (Inno Setup script)
-#   schoollive-logo.png – logó a gyökérben
-#   Requirements.txt    – pip függőségek
-#
-# Kimenet:
-#   dist/SchoolLivePlayer.exe     – standalone binary
-#   installer/SchoolLiveSetup.exe – Inno Setup telepítő
-
 name: Build Windows Installer
 
 on:
@@ -30,26 +15,24 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Python 3.11 ───────────────────────────────────────────────────────
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ── 3. Függőségek ────────────────────────────────────────────────────────
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r Requirements.txt
           pip install pyinstaller
 
-      # ── 4. Verzió meghatározás ───────────────────────────────────────────────
       - name: Set version
         id: version
         shell: bash
@@ -63,8 +46,6 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
-      # ── 5. PyInstaller build ─────────────────────────────────────────────────
-      # main.py a player/ mappában van
       - name: Build executable
         run: |
           pyinstaller `
@@ -78,32 +59,34 @@ jobs:
             --hidden-import bcrypt `
             player/main.py
 
-      # ── 6. Inno Setup letöltés és build ──────────────────────────────────────
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
-        shell: powershell
 
       - name: Build installer
         env:
           APP_VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/setup.iss
         shell: powershell
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
+          }
+          Write-Host "Using ISCC: $iscc"
+          & $iscc installer/setup.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # ── 7. Artifacts ─────────────────────────────────────────────────────────
-      - name: Upload standalone exe
+      - name: Upload standalone exe artifact
         uses: actions/upload-artifact@v4
         with:
           name: SchoolLivePlayer-${{ steps.version.outputs.VERSION }}-standalone
           path: dist/SchoolLivePlayer.exe
 
-      - name: Upload installer
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: SchoolLivePlayer-${{ steps.version.outputs.VERSION }}-setup
           path: installer/SchoolLiveSetup.exe
 
-      # ── 8. GitHub Release (csak tagnél) ──────────────────────────────────────
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
@@ -126,4 +109,3 @@ jobs:
             - Internetkapcsolat a SchoolLive szerverhez
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
