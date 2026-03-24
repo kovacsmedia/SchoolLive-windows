@@ -1,12 +1,5 @@
 # player/ui.py
 # SchoolLive Player – PyQt6 modern material dark UI
-#
-# Változások:
-#   • PulsingLine widget – narancs (AMBER) pulzáló vonal az animációhoz
-#   • Rádió overlay: ProgressBar → PulsingLine, AMBER/narancssárga szín
-#   • Rádió overlay: dismiss (×) gomb – STOP_PLAYBACK nélkül is bezárható
-#   • _do_hide_overlay: PulsingLine timer leállítása
-#   • Rádió cím: az átadott title-t írja ki (app.py mindig "Iskolarádió"-t ad)
 
 import time
 import math
@@ -161,10 +154,7 @@ class ProgressBar(QWidget):
 
 
 class PulsingLine(QWidget):
-    """
-    Rádió lejátszás animáció – teljes szélességű narancs vonal,
-    opacity sin()-alapú pulzálással (0.25 – 1.0).
-    """
+    """Rádió lejátszás animáció – teljes szélességű narancs vonal."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self._opacity  = 1.0
@@ -180,12 +170,10 @@ class PulsingLine(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        # Track (halvány alap)
         bg = QColor(BORDER)
         p.setBrush(QBrush(bg))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(0, 0, w, h, h//2, h//2)
-        # Pulzáló teli vonal
         grad = QLinearGradient(0, 0, w, 0)
         c1 = QColor(self._color);  c1.setAlphaF(self._opacity)
         c2 = QColor(self._color2); c2.setAlphaF(self._opacity)
@@ -371,7 +359,7 @@ class PlayerUI(QMainWindow):
         self._logo_label.setStyleSheet("background: transparent;")
         try:
             from PyQt6.QtGui import QPixmap
-            pix = QPixmap("schoollive-logo.png")
+            pix = QPixmap("player/schoollive-logo.png")
             self._logo_pixmap = pix if not pix.isNull() else None
         except Exception:
             self._logo_pixmap = None
@@ -582,7 +570,6 @@ class PlayerUI(QMainWindow):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setSpacing(16)
 
-        # ── Üzenet widgetek ───────────────────────────────────────────────────
         self._lbl_msg_text = QLabel("")
         self._lbl_msg_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_msg_text.setWordWrap(True)
@@ -595,7 +582,6 @@ class PlayerUI(QMainWindow):
         self._prog_bar.setFixedWidth(500)
         layout.addWidget(self._prog_bar, 0, Qt.AlignmentFlag.AlignCenter)
 
-        # ── Rádió widgetek ────────────────────────────────────────────────────
         self._lbl_radio_icon = QLabel("📻")
         self._lbl_radio_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_radio_icon.setStyleSheet("font-size: 64px;")
@@ -608,12 +594,10 @@ class PlayerUI(QMainWindow):
         )
         layout.addWidget(self._lbl_radio_title)
 
-        # Pulzáló narancs vonal (ProgressBar helyett)
         self._pulsing_line = PulsingLine()
         self._pulsing_line.setFixedWidth(500)
         layout.addWidget(self._pulsing_line, 0, Qt.AlignmentFlag.AlignCenter)
 
-        # Dismiss gomb (rádió overlay bezárásához, ha STOP_PLAYBACK nem jönne)
         self._btn_dismiss = QPushButton("×  Bezárás")
         self._btn_dismiss.setFixedSize(160, 40)
         self._btn_dismiss.setStyleSheet(
@@ -623,7 +607,6 @@ class PlayerUI(QMainWindow):
         self._btn_dismiss.clicked.connect(self._do_hide_overlay)
         layout.addWidget(self._btn_dismiss, 0, Qt.AlignmentFlag.AlignCenter)
 
-        # Üzenet progress timer
         self._prog_timer = QTimer()
         self._prog_timer.setInterval(100)
         self._prog_timer.timeout.connect(self._update_progress)
@@ -650,17 +633,23 @@ class PlayerUI(QMainWindow):
         self._clock_timer.start()
         self._tick_clock()
 
+    # Magyar hónapok és napok – Windows kompatibilis, locale-független
+    _HU_MONTHS = [
+        "", "január", "február", "március", "április", "május", "június",
+        "július", "augusztus", "szeptember", "október", "november", "december"
+    ]
+    _HU_DAYS = [
+        "hétfő", "kedd", "szerda", "csütörtök", "péntek", "szombat", "vasárnap"
+    ]
+
     def _tick_clock(self):
         now = datetime.datetime.now()
         if hasattr(self, "_lbl_clock"):
             self._lbl_clock.setText(now.strftime("%H:%M:%S"))
         if hasattr(self, "_lbl_date"):
-            try:
-                import locale
-                locale.setlocale(locale.LC_TIME, "hu_HU.UTF-8")
-            except Exception:
-                pass
-            self._lbl_date.setText(now.strftime("%Y. %B %d., %A").capitalize())
+            month    = self._HU_MONTHS[now.month]
+            day      = self._HU_DAYS[now.weekday()]
+            self._lbl_date.setText(f"{now.year}. {month} {now.day}., {day}")
         if hasattr(self, "_main_content") and self._main_content.width() > 0:
             self._layout_main_content()
         self._refresh_next_bell()
@@ -735,17 +724,15 @@ class PlayerUI(QMainWindow):
 
     # ── Rádió pulzáló animáció ────────────────────────────────────────────────
     def _start_radio_pulse(self):
-        """Narancs vonal pulzálása – opacity sin() alapján (0.25–1.0)."""
         self._radio_pulse_step = 0
         if self._radio_pulse_timer is None:
             self._radio_pulse_timer = QTimer(self)
-            self._radio_pulse_timer.setInterval(40)   # ~25fps
+            self._radio_pulse_timer.setInterval(40)
             self._radio_pulse_timer.timeout.connect(self._radio_pulse_tick)
         self._radio_pulse_timer.start()
 
     def _radio_pulse_tick(self):
         self._radio_pulse_step += 1
-        # Lassú, kellemes pulzálás: ~2s periódus
         opacity = 0.25 + 0.75 * (math.sin(self._radio_pulse_step * 0.065) + 1) / 2
         self._pulsing_line.set_opacity(opacity)
 
@@ -857,7 +844,6 @@ class PlayerUI(QMainWindow):
             self._bell_banner.hide()
 
     def _do_show_msg_overlay(self, text: str, reading_ms: int):
-        # Rádió widgetek elrejtése
         self._lbl_radio_icon.hide()
         self._lbl_radio_title.hide()
         self._pulsing_line.hide()
@@ -865,7 +851,6 @@ class PlayerUI(QMainWindow):
         if self._radio_pulse_timer:
             self._radio_pulse_timer.stop()
 
-        # Üzenet widgetek
         l = len(text.strip())
         if   l <= 40:  size = 52
         elif l <= 80:  size = 38
@@ -890,16 +875,14 @@ class PlayerUI(QMainWindow):
             self._overlay.setGeometry(0, 0, cw.width(), cw.height())
 
     def _do_show_radio_overlay(self, title: str):
-        # Üzenet widgetek elrejtése
         self._lbl_msg_text.hide()
         self._prog_bar.hide()
         self._prog_timer.stop()
         if self._dismiss_timer:
             self._dismiss_timer.stop()
 
-        # Rádió widgetek – cím AMBER színnel
         self._lbl_radio_icon.show()
-        self._lbl_radio_title.setText(title)   # app.py mindig "Iskolarádió"-t ad
+        self._lbl_radio_title.setText(title)
         self._lbl_radio_title.setStyleSheet(
             f"color: {AMBER}; font-size: 48px; font-weight: 900;"
         )
@@ -908,7 +891,6 @@ class PlayerUI(QMainWindow):
         self._btn_dismiss.show()
         self._overlay_visible = True
 
-        # Narancs pulzáló animáció indítása
         self._start_radio_pulse()
 
         self._overlay.show()
@@ -918,7 +900,6 @@ class PlayerUI(QMainWindow):
             self._overlay.setGeometry(0, 0, cw.width(), cw.height())
 
     def _do_hide_overlay(self):
-        # Minden timer leállítása
         self._prog_timer.stop()
         if self._dismiss_timer:
             self._dismiss_timer.stop()

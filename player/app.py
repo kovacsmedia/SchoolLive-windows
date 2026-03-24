@@ -1,10 +1,4 @@
 # player/app.py
-# Változások:
-#   • Rádió: show_radio_overlay("Iskolarádió") – mindig fixált felirat
-#   • _on_snap_disconnected: hide_overlay() – lejátszás után eltűnik az overlay
-#   • TTS fallback: ha snap_usable=False, audio.play_url() hívódik
-#   • _on_immediate PLAY_URL: show_radio_overlay("Iskolarádió")
-#   • snap port lekérés: _fetch_info()-ban, snap.start() csak port után
 
 import time
 import threading
@@ -119,7 +113,7 @@ class SchoolLiveApp:
                 self._snap.start()
                 self.ui.set_snap_status("⏳ Snapcast csatlakozás...")
             else:
-                self.ui.set_snap_status("⚠ snapclient nem found")
+                self.ui.set_snap_status("🔊 Belső lejátszó (snapclient nélkül)")
 
         threading.Thread(target=_fetch_info, daemon=True).start()
 
@@ -139,7 +133,6 @@ class SchoolLiveApp:
 
     def _on_snap_disconnected(self) -> None:
         self.ui.set_snap_status("⚠ Snapcast lecsatlakozva")
-        # Ha épp lejátszás volt, az overlay automatikusan eltűnik
         self.ui.hide_overlay()
 
     def _on_snap_error(self, msg: str) -> None:
@@ -196,7 +189,15 @@ class SchoolLiveApp:
             return
 
         server_now = self._ws.clock.server_now_ms()
-        delay_ms   = max(0, (play_at_ms or 0) - server_now) if play_at_ms else 0
+        if play_at_ms:
+            delay_ms = (play_at_ms - server_now)
+            if delay_ms < -10_000:
+                # 10 másodpercnél régebbi parancs – eldobjuk
+                print(f"[App] PLAY stale ({-delay_ms:.0f}ms régen volt) → skip")
+                return
+            delay_ms = max(0, delay_ms)
+        else:
+            delay_ms = 0
 
         ctx = {
             "action":      prepare.get("action", ""),
@@ -230,12 +231,10 @@ class SchoolLiveApp:
                 if text:
                     reading_ms = self._calc_reading_ms(text)
                     self.ui.show_message_overlay(text, reading_ms)
-                # Fallback: ha snap nem játszik, audio.play_url
                 if not snap_usable and url:
                     audio.play_url(url, volume / 10)
 
             elif action == "PLAY_URL":
-                # Cím mindig "Iskolarádió" – nem a fájlnév
                 self.ui.show_radio_overlay("Iskolarádió")
                 if not snap_usable and url:
                     audio.play_url(url, volume / 10)
@@ -287,7 +286,6 @@ class SchoolLiveApp:
                 audio.play_url(url, self._volume / 10)
 
         elif action == "PLAY_URL":
-            # Cím mindig "Iskolarádió"
             self.ui.show_radio_overlay("Iskolarádió")
             url = msg.get("url")
             if not snap_usable and url:
@@ -297,7 +295,6 @@ class SchoolLiveApp:
             audio.stop()
             self.ui.hide_overlay()
             self.ui.show_bell_banner(False)
-            # Targeting reset
             if self._snap_muted:
                 print("[App] STOP_PLAYBACK → snap unmute + restart")
                 self._snap_muted = False
@@ -327,6 +324,8 @@ class SchoolLiveApp:
                 body = json.dumps({
                     "hardwareId": HARDWARE_ID,
                     "shortId":    SHORT_ID,
+                    "platform":   "windows",
+                    "appVersion": "1.1.0",
                 }).encode()
                 req = urllib.request.Request(
                     f"{API_BASE}/devices/native/beacon",
@@ -338,7 +337,6 @@ class SchoolLiveApp:
                 resp_data = json.loads(
                     urllib.request.urlopen(req, timeout=5).read()
                 )
-                # deviceId cache-elése ha visszajön
                 did = resp_data.get("deviceId")
                 if did and not self._device_id:
                     self._device_id = did
