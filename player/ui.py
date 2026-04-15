@@ -1,5 +1,13 @@
 # player/ui.py
-# SchoolLive Player – PyQt6 modern material dark UI
+# SchoolLive Player – PyQt6 UI
+#
+# v3 változások:
+#   • StatusDot: három állapot (zöld / villogó narancs / piros) + felirat
+#   • set_snap_status(SnapStatus) – snap pont frissítése
+#   • set_ws_status(WsStatus)     – net pont frissítése
+#   • show_bell_overlay(dur_ms)   – bell overlay (volt: show_bell_banner)
+#   • show_radio_overlay(title, dur_ms=None) – dur_ms fogadva
+#   • _do_hide_overlay: bell_banner is elrejtve
 
 import time
 import math
@@ -8,67 +16,46 @@ from typing import Optional, Callable
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
-    QLineEdit, QFrame, QVBoxLayout, QHBoxLayout, QStackedWidget,
-    QGraphicsOpacityEffect, QSizePolicy,
+    QFrame, QVBoxLayout, QHBoxLayout, QStackedWidget,
+    QGraphicsOpacityEffect,
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation,
-    QEasingCurve, QRect, pyqtProperty, QObject, QPoint,
+    Qt, QTimer, pyqtSignal, QObject,
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QBrush, QLinearGradient,
-    QPen, QFontDatabase, QPalette, QScreen,
+    QFontDatabase,
 )
 
-# ── Paletta ────────────────────────────────────────────────────────────────────
-BG          = "#07101f"
-BG2         = "#0d1b2e"
-BG3         = "#0a1628"
-BORDER      = "#1a2d47"
-TEXT        = "#f0f6ff"
-TEXT_MUTED  = "#8da4c0"
-TEXT_DIM    = "#4a6280"
-BLUE        = "#3b82f6"
-BLUE_DARK   = "#1d4ed8"
-BLUE_GLOW   = "rgba(59,130,246,0.15)"
-GREEN       = "#22c55e"
-RED         = "#ef4444"
-AMBER       = "#f59e0b"
-ORANGE      = "#f97316"
-PURPLE      = "#6366f1"
+from snapcast_manager import SnapStatus
+from sync_client      import WsStatus
 
-# ── Global stylesheet ──────────────────────────────────────────────────────────
+# ── Paletta ───────────────────────────────────────────────────────────────────
+BG         = "#07101f"
+BG2        = "#0d1b2e"
+BORDER     = "#1a2d47"
+TEXT       = "#f0f6ff"
+TEXT_MUTED = "#8da4c0"
+TEXT_DIM   = "#4a6280"
+BLUE       = "#3b82f6"
+PURPLE     = "#6366f1"
+GREEN      = "#22c55e"
+RED        = "#ef4444"
+AMBER      = "#f59e0b"
+ORANGE     = "#f97316"
+
 GLOBAL_QSS = f"""
 QMainWindow, QWidget {{
     background: {BG};
     color: {TEXT};
     font-family: 'Segoe UI', 'Inter', 'SF Pro Display', Arial, sans-serif;
 }}
-QLabel {{
-    background: transparent;
-    color: {TEXT};
-}}
-QLineEdit {{
-    background: {BG2};
-    color: {TEXT};
-    border: 1.5px solid {BORDER};
-    border-radius: 10px;
-    padding: 10px 16px;
-    font-size: 14px;
-    selection-background-color: {BLUE};
-}}
-QLineEdit:focus {{
-    border: 1.5px solid {BLUE};
-}}
+QLabel {{ background: transparent; color: {TEXT}; }}
 QPushButton {{
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
         stop:0 {BLUE}, stop:1 {PURPLE});
-    color: white;
-    border: none;
-    border-radius: 12px;
-    padding: 12px 32px;
-    font-size: 14px;
-    font-weight: 600;
+    color: white; border: none; border-radius: 12px;
+    padding: 12px 32px; font-size: 14px; font-weight: 600;
 }}
 QPushButton:hover {{
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
@@ -78,14 +65,9 @@ QPushButton:pressed {{
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
         stop:0 #1d4ed8, stop:1 #3730a3);
 }}
-QPushButton:disabled {{
-    background: {BORDER};
-    color: {TEXT_DIM};
-}}
+QPushButton:disabled {{ background: {BORDER}; color: {TEXT_DIM}; }}
 QFrame#card {{
-    background: {BG2};
-    border: 1px solid {BORDER};
-    border-radius: 16px;
+    background: {BG2}; border: 1px solid {BORDER}; border-radius: 16px;
 }}
 QFrame#banner {{
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
@@ -99,35 +81,132 @@ QFrame#updateBanner {{
 }}
 """
 
-# ── Segéd: thread-safe UI híd ─────────────────────────────────────────────────
+# ── UIBridge ──────────────────────────────────────────────────────────────────
 class UIBridge(QObject):
-    set_online_signal          = pyqtSignal(bool)
-    set_snap_signal            = pyqtSignal(str)
+    set_snap_status_signal     = pyqtSignal(object)   # SnapStatus
+    set_ws_status_signal       = pyqtSignal(object)   # WsStatus
     set_institution_signal     = pyqtSignal(str)
     set_bells_signal           = pyqtSignal(list)
     set_cache_signal           = pyqtSignal(str)
-    show_bell_banner_signal    = pyqtSignal(bool)
+    show_bell_overlay_signal   = pyqtSignal(object)   # int | None
     show_msg_overlay_signal    = pyqtSignal(str, int)
-    show_radio_overlay_signal  = pyqtSignal(str)
+    show_radio_overlay_signal  = pyqtSignal(str, object)  # title, dur_ms|None
     hide_overlay_signal        = pyqtSignal()
     show_update_banner_signal  = pyqtSignal(str)
-    show_login_signal          = pyqtSignal()
-    hide_login_signal          = pyqtSignal()
     show_pending_signal        = pyqtSignal()
     hide_pending_signal        = pyqtSignal()
-    set_login_error_signal     = pyqtSignal(str)
     set_volume_display_signal  = pyqtSignal(int)
 
+    # Kompatibilitás: set_online(bool) → ws_status mappelés
+    set_online_signal          = pyqtSignal(bool)
 
-# ── Egyedi widgetek ────────────────────────────────────────────────────────────
-class ProgressBar(QWidget):
-    """Gradient progress sáv – üzenet olvasási időhöz."""
+
+# ── Státuszpont widget ────────────────────────────────────────────────────────
+class StatusIndicator(QWidget):
+    """
+    Színes állapotpont felirattal.
+
+    Állapotok:
+      "green"   → zöld, statikus
+      "blink"   → narancssárga, villogó (0.5s periódus)
+      "red"     → piros, statikus
+      "offline" → szürke, statikus
+    """
+
+    DOT_SIZE   = 12
+    BLINK_MS   = 500
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        self._state    = "offline"
+        self._blink_on = True
+        self._label    = label
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        # Pont
+        self._dot_widget = _DotWidget(self)
+        self._dot_widget.setFixedSize(self.DOT_SIZE, self.DOT_SIZE)
+        layout.addWidget(self._dot_widget, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # Felirat
+        self._lbl = QLabel(label)
+        self._lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 9px; font-weight: 600; "
+            f"letter-spacing: 0.5px; text-transform: uppercase;"
+        )
+        layout.addWidget(self._lbl)
+
+        # Villogó timer
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(self.BLINK_MS)
+        self._blink_timer.timeout.connect(self._blink_tick)
+
+        self.setFixedWidth(36)
+
+    def set_state(self, state: str) -> None:
+        """state: 'green' | 'blink' | 'red' | 'offline'"""
+        if self._state == state:
+            return
+        self._state = state
+        if state == "blink":
+            self._blink_on = True
+            self._blink_timer.start()
+        else:
+            self._blink_timer.stop()
+            self._blink_on = True
+        self._dot_widget.set_color(self._current_color())
+        self._dot_widget.update()
+
+    def _blink_tick(self) -> None:
+        self._blink_on = not self._blink_on
+        self._dot_widget.set_color(self._current_color())
+        self._dot_widget.update()
+
+    def _current_color(self) -> QColor:
+        if self._state == "green":
+            return QColor(GREEN)
+        if self._state == "blink":
+            return QColor(AMBER) if self._blink_on else QColor(BG2)
+        if self._state == "red":
+            return QColor(RED)
+        return QColor(TEXT_DIM)   # offline / szürke
+
+
+class _DotWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._pct = 0.0
-        self.setFixedHeight(6)
+        self._color = QColor(TEXT_DIM)
+
+    def set_color(self, color: QColor) -> None:
+        self._color = color
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QBrush(self._color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(0, 0, self.width(), self.height())
+        # Zöld esetén halvány glow
+        if self._color == QColor(GREEN):
+            glow = QColor(GREEN)
+            glow.setAlpha(50)
+            p.setBrush(QBrush(glow))
+            p.drawEllipse(-3, -3, self.width() + 6, self.height() + 6)
+
+
+# ── Progress bar ──────────────────────────────────────────────────────────────
+class ProgressBar(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pct    = 0.0
         self._color1 = QColor(BLUE)
         self._color2 = QColor(PURPLE)
+        self.setFixedHeight(6)
 
     def set_pct(self, pct: float):
         self._pct = max(0.0, min(1.0, pct))
@@ -153,13 +232,13 @@ class ProgressBar(QWidget):
             p.drawRoundedRect(0, 0, int(w * self._pct), h, h//2, h//2)
 
 
+# ── Pulsing line (rádió) ──────────────────────────────────────────────────────
 class PulsingLine(QWidget):
-    """Rádió lejátszás animáció – teljes szélességű narancs vonal."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._opacity  = 1.0
-        self._color    = QColor(AMBER)
-        self._color2   = QColor(ORANGE)
+        self._opacity = 1.0
+        self._color1  = QColor(AMBER)
+        self._color2  = QColor(ORANGE)
         self.setFixedHeight(6)
 
     def set_opacity(self, opacity: float):
@@ -170,40 +249,15 @@ class PulsingLine(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        bg = QColor(BORDER)
-        p.setBrush(QBrush(bg))
+        p.setBrush(QBrush(QColor(BORDER)))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(0, 0, w, h, h//2, h//2)
         grad = QLinearGradient(0, 0, w, 0)
-        c1 = QColor(self._color);  c1.setAlphaF(self._opacity)
+        c1 = QColor(self._color1); c1.setAlphaF(self._opacity)
         c2 = QColor(self._color2); c2.setAlphaF(self._opacity)
-        grad.setColorAt(0, c1)
-        grad.setColorAt(1, c2)
+        grad.setColorAt(0, c1); grad.setColorAt(1, c2)
         p.setBrush(QBrush(grad))
         p.drawRoundedRect(0, 0, w, h, h//2, h//2)
-
-
-class StatusDot(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._online = False
-        self.setFixedSize(12, 12)
-
-    def set_online(self, online: bool):
-        self._online = online
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor(GREEN if self._online else RED)
-        p.setBrush(QBrush(color))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(0, 0, 12, 12)
-        if self._online:
-            glow = QColor(GREEN); glow.setAlpha(60)
-            p.setBrush(QBrush(glow))
-            p.drawEllipse(-3, -3, 18, 18)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -214,12 +268,11 @@ class PlayerUI(QMainWindow):
         self._connect_bridge()
         self._volume = 7
         self._bells: list = []
-        self._overlay_visible = False
-        self._banner_visible  = False
+        self._overlay_visible   = False
         self._update_click_cb: Optional[Callable] = None
-        self.on_volume_change: Optional[Callable] = None
-        self._dismiss_step    = 0
-        self._dismiss_timer:  Optional[QTimer] = None
+        self.on_volume_change:  Optional[Callable] = None
+        self._dismiss_step      = 0
+        self._dismiss_timer:    Optional[QTimer] = None
         self._radio_pulse_timer: Optional[QTimer] = None
         self._radio_pulse_step  = 0
 
@@ -227,33 +280,31 @@ class PlayerUI(QMainWindow):
         self._build_ui()
         self._start_clock()
 
-    # ── Bridge ─────────────────────────────────────────────────────────────────
+    # ── Bridge ────────────────────────────────────────────────────────────────
     def _connect_bridge(self):
         b = self._bridge
-        b.set_online_signal.connect(self._do_set_online)
-        b.set_snap_signal.connect(self._do_set_snap)
+        b.set_snap_status_signal.connect(self._do_set_snap_status)
+        b.set_ws_status_signal.connect(self._do_set_ws_status)
+        b.set_online_signal.connect(self._do_set_online_compat)
         b.set_institution_signal.connect(self._do_set_institution)
         b.set_bells_signal.connect(self._do_set_bells)
         b.set_cache_signal.connect(self._do_set_cache)
-        b.show_bell_banner_signal.connect(self._do_show_bell_banner)
+        b.show_bell_overlay_signal.connect(self._do_show_bell_overlay)
         b.show_msg_overlay_signal.connect(self._do_show_msg_overlay)
         b.show_radio_overlay_signal.connect(self._do_show_radio_overlay)
         b.hide_overlay_signal.connect(self._do_hide_overlay)
         b.show_update_banner_signal.connect(self._do_show_update_banner)
-        b.show_login_signal.connect(self._do_show_login)
-        b.hide_login_signal.connect(self._do_hide_login)
         b.show_pending_signal.connect(self._do_show_pending)
         b.hide_pending_signal.connect(self._do_hide_pending)
-        b.set_login_error_signal.connect(self._do_set_login_error)
         b.set_volume_display_signal.connect(self._do_set_volume)
 
-    # ── Ablak ──────────────────────────────────────────────────────────────────
+    # ── Ablak ─────────────────────────────────────────────────────────────────
     def _setup_window(self):
         self.setWindowTitle("SchoolLive Player")
         self.setStyleSheet(GLOBAL_QSS)
         self.showFullScreen()
 
-    # ── UI építés ──────────────────────────────────────────────────────────────
+    # ── UI építés ─────────────────────────────────────────────────────────────
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
@@ -265,30 +316,30 @@ class PlayerUI(QMainWindow):
         self._update_banner = QFrame()
         self._update_banner.setObjectName("updateBanner")
         self._update_banner.setFixedHeight(40)
-        _ub_layout = QHBoxLayout(self._update_banner)
-        _ub_layout.setContentsMargins(0, 0, 0, 0)
+        _ub = QHBoxLayout(self._update_banner)
+        _ub.setContentsMargins(0, 0, 0, 0)
         self._lbl_update = QLabel("")
         self._lbl_update.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_update.setStyleSheet(
-            "color: white; font-size: 13px; font-weight: 600; background: transparent;"
+            "color: white; font-size: 13px; font-weight: 600;"
         )
         self._lbl_update.mousePressEvent = self._on_update_click
-        _ub_layout.addWidget(self._lbl_update)
+        _ub.addWidget(self._lbl_update)
         self._update_banner.hide()
         self._root_layout.addWidget(self._update_banner)
 
-        # Bell banner
+        # Bell banner (sárga csík tetején)
         self._bell_banner = QFrame()
         self._bell_banner.setObjectName("banner")
         self._bell_banner.setFixedHeight(40)
-        _bb_layout = QHBoxLayout(self._bell_banner)
-        _bb_layout.setContentsMargins(0, 0, 0, 0)
+        _bb = QHBoxLayout(self._bell_banner)
+        _bb.setContentsMargins(0, 0, 0, 0)
         _bb_lbl = QLabel("🔔  Csengetés folyamatban")
         _bb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         _bb_lbl.setStyleSheet(
-            "color: white; font-size: 13px; font-weight: 700; background: transparent;"
+            "color: white; font-size: 13px; font-weight: 700;"
         )
-        _bb_layout.addWidget(_bb_lbl)
+        _bb.addWidget(_bb_lbl)
         self._bell_banner.hide()
         self._root_layout.addWidget(self._bell_banner)
 
@@ -296,17 +347,16 @@ class PlayerUI(QMainWindow):
 
         self._stack = QStackedWidget()
         self._root_layout.addWidget(self._stack)
-
         self._main_widget    = self._build_main()
         self._pending_widget = self._build_pending()
-        self._stack.addWidget(self._main_widget)    # 0
-        self._stack.addWidget(self._pending_widget) # 1
+        self._stack.addWidget(self._main_widget)
+        self._stack.addWidget(self._pending_widget)
         self._stack.setCurrentIndex(1)
 
         self._overlay = self._build_overlay()
         self._overlay.hide()
 
-    # ── Header ─────────────────────────────────────────────────────────────────
+    # ── Header ────────────────────────────────────────────────────────────────
     def _build_header(self) -> QWidget:
         frame = QFrame()
         frame.setStyleSheet(f"background: {BG2}; border-bottom: 1px solid {BORDER};")
@@ -314,6 +364,7 @@ class PlayerUI(QMainWindow):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(28, 0, 28, 0)
 
+        # Bal: brand + intézmény
         left = QVBoxLayout()
         left.setSpacing(2)
         brand = QLabel("SchoolLive")
@@ -325,30 +376,27 @@ class PlayerUI(QMainWindow):
         layout.addLayout(left)
         layout.addStretch()
 
-        self._lbl_snap = QLabel("")
-        self._lbl_snap.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
-        layout.addWidget(self._lbl_snap)
-        layout.addSpacing(16)
+        # Jobb: snap pont + net pont
+        indicators = QHBoxLayout()
+        indicators.setSpacing(20)
+        indicators.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        self._dot = StatusDot()
-        self._lbl_status = QLabel("Offline")
-        self._lbl_status.setStyleSheet(
-            f"color: {TEXT_DIM}; font-size: 12px; font-weight: 700;"
-        )
-        layout.addWidget(self._dot)
-        layout.addSpacing(6)
-        layout.addWidget(self._lbl_status)
+        self._snap_indicator = StatusIndicator("snap")
+        self._net_indicator  = StatusIndicator("net")
+
+        indicators.addWidget(self._snap_indicator)
+        indicators.addWidget(self._net_indicator)
+        layout.addLayout(indicators)
 
         return frame
 
-    # ── Main képernyő ──────────────────────────────────────────────────────────
+    # ── Main ──────────────────────────────────────────────────────────────────
     def _build_main(self) -> QWidget:
         outer = QWidget()
         outer.setStyleSheet(f"background: {BG};")
         outer_layout = QVBoxLayout(outer)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
-
         content = QWidget()
         content.setStyleSheet(f"background: {BG};")
         outer_layout.addWidget(content, stretch=1)
@@ -367,21 +415,19 @@ class PlayerUI(QMainWindow):
         logo_opacity = QGraphicsOpacityEffect()
         logo_opacity.setOpacity(0.10)
         self._logo_label.setGraphicsEffect(logo_opacity)
-
         if self._logo_pixmap is None:
             self._logo_label.setText("SchoolLive")
             self._logo_label.setStyleSheet(
-                f"background: transparent; color: {TEXT};"
+                f"background: transparent; color: {TEXT}; "
                 f"font-size: 96px; font-weight: 900; letter-spacing: -2px;"
             )
 
         self._lbl_clock = QLabel("00:00:00", content)
         self._lbl_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_clock.setStyleSheet(
-            f"color: {TEXT}; font-size: 180px; font-weight: 1200;"
+            f"color: {TEXT}; font-size: 180px; font-weight: 900;"
             f"letter-spacing: -3px; background: transparent;"
             f"font-family: 'Ubuntu', 'Segoe UI', Arial, sans-serif;"
-            f"font-variant-numeric: tabular-nums;"
         )
 
         self._lbl_date = QLabel("", content)
@@ -393,26 +439,20 @@ class PlayerUI(QMainWindow):
         self._bell_card = QFrame(content)
         self._bell_card.setObjectName("card")
         self._bell_card.setFixedSize(380, 64)
-        bell_layout = QHBoxLayout(self._bell_card)
-        bell_layout.setContentsMargins(20, 0, 20, 0)
-        bell_icon = QLabel("🔔")
-        bell_icon.setStyleSheet("font-size: 22px; background: transparent;")
-        bell_label = QLabel("Következő csengetés:")
-        bell_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px; font-weight: 600;")
+        bc = QHBoxLayout(self._bell_card)
+        bc.setContentsMargins(20, 0, 20, 0)
+        bc.addWidget(QLabel("🔔"))
+        lbl_nb = QLabel("Következő csengetés:")
+        lbl_nb.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px; font-weight: 600;")
+        bc.addWidget(lbl_nb)
+        bc.addStretch()
         self._lbl_next_bell = QLabel("--:--")
-        self._lbl_next_bell.setStyleSheet(
-            f"color: {TEXT}; font-size: 22px; font-weight: 800;"
-        )
-        bell_layout.addWidget(bell_icon)
-        bell_layout.addSpacing(8)
-        bell_layout.addWidget(bell_label)
-        bell_layout.addStretch()
-        bell_layout.addWidget(self._lbl_next_bell)
+        self._lbl_next_bell.setStyleSheet(f"color: {TEXT}; font-size: 22px; font-weight: 800;")
+        bc.addWidget(self._lbl_next_bell)
         self._bell_card.hide()
 
         self._main_content = content
         self._layout_main_content()
-
         return outer
 
     def _layout_main_content(self):
@@ -423,9 +463,8 @@ class PlayerUI(QMainWindow):
         if w == 0 or h == 0:
             return
 
-        logo_size = min(w * 1.4, h * 1.2)
-        lw = int(logo_size)
-        lh = int(logo_size * 0.35)
+        lw = int(min(w * 1.4, h * 1.2))
+        lh = int(lw * 0.35)
         if self._logo_pixmap:
             from PyQt6.QtCore import Qt as _Qt
             scaled = self._logo_pixmap.scaled(
@@ -442,7 +481,7 @@ class PlayerUI(QMainWindow):
             (h - self._logo_label.height()) // 2,
         )
 
-        fm = self._lbl_clock.fontMetrics()
+        fm      = self._lbl_clock.fontMetrics()
         clock_w = fm.horizontalAdvance("00:00:00") + 20
         clock_h = fm.height() + 20
         self._lbl_clock.setFixedSize(clock_w, clock_h)
@@ -455,11 +494,9 @@ class PlayerUI(QMainWindow):
         self._lbl_date.setFixedSize(dw, dh)
         date_y = clock_y + clock_h + 6
         self._lbl_date.move((w - dw) // 2, date_y)
+        self._bell_card.move((w - self._bell_card.width()) // 2, date_y + dh + 20)
 
-        bell_y = date_y + dh + 20
-        self._bell_card.move((w - self._bell_card.width()) // 2, bell_y)
-
-    # ── Footer ─────────────────────────────────────────────────────────────────
+    # ── Footer ────────────────────────────────────────────────────────────────
     def _build_footer(self) -> QWidget:
         frame = QFrame()
         frame.setStyleSheet(f"background: {BG2}; border-top: 1px solid {BORDER};")
@@ -477,10 +514,10 @@ class PlayerUI(QMainWindow):
         layout.addWidget(self._lbl_cache)
         layout.addStretch()
 
-        vol_frame = QHBoxLayout()
-        vol_frame.setSpacing(4)
-        lbl_speaker = QLabel("🔈")
-        lbl_speaker.setStyleSheet("font-size: 14px;")
+        # Hangerő
+        vol = QHBoxLayout()
+        vol.setSpacing(4)
+        lbl_s1 = QLabel("🔈"); lbl_s1.setStyleSheet("font-size: 14px;")
         self._btn_vol_down = QPushButton("−")
         self._btn_vol_down.setFixedSize(30, 30)
         self._btn_vol_down.setStyleSheet(
@@ -488,28 +525,21 @@ class PlayerUI(QMainWindow):
             f"border-radius: 8px; font-size: 16px; padding: 0;"
         )
         self._btn_vol_down.clicked.connect(self._vol_down)
-
         self._lbl_vol = QLabel("7")
         self._lbl_vol.setFixedWidth(24)
         self._lbl_vol.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_vol.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 13px;")
-
         self._btn_vol_up = QPushButton("+")
         self._btn_vol_up.setFixedSize(30, 30)
         self._btn_vol_up.setStyleSheet(self._btn_vol_down.styleSheet())
         self._btn_vol_up.clicked.connect(self._vol_up)
-
-        lbl_speaker2 = QLabel("🔊")
-        lbl_speaker2.setStyleSheet("font-size: 14px;")
-
-        for ww in [lbl_speaker, self._btn_vol_down, self._lbl_vol,
-                   self._btn_vol_up, lbl_speaker2]:
-            vol_frame.addWidget(ww)
-        layout.addLayout(vol_frame)
-
+        lbl_s2 = QLabel("🔊"); lbl_s2.setStyleSheet("font-size: 14px;")
+        for w in [lbl_s1, self._btn_vol_down, self._lbl_vol, self._btn_vol_up, lbl_s2]:
+            vol.addWidget(w)
+        layout.addLayout(vol)
         return frame
 
-    # ── Pending ────────────────────────────────────────────────────────────────
+    # ── Pending ───────────────────────────────────────────────────────────────
     def _build_pending(self) -> QWidget:
         w = QWidget()
         w.setStyleSheet(f"background: {BG};")
@@ -532,40 +562,36 @@ class PlayerUI(QMainWindow):
             "Kérj meg egy rendszergazdát, hogy aktiválja az Eszközök menüben."
         )
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px; line-height: 1.6;")
+        sub.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px;")
         layout.addWidget(sub)
 
         card = QFrame()
         card.setObjectName("card")
         card.setFixedWidth(340)
-        c_layout = QVBoxLayout(card)
-        c_layout.setContentsMargins(20, 16, 20, 16)
-        c_layout.setSpacing(4)
-        lbl_id_title = QLabel("ESZKÖZ AZONOSÍTÓ")
-        lbl_id_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_id_title.setStyleSheet(
-            f"color: {TEXT_DIM}; font-size: 10px; letter-spacing: 1px;"
-        )
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(20, 16, 20, 16)
+        cl.setSpacing(4)
+        lbl_t = QLabel("ESZKÖZ AZONOSÍTÓ")
+        lbl_t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_t.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; letter-spacing: 1px;")
         from api_client import SHORT_ID
         lbl_id = QLabel(SHORT_ID)
         lbl_id.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_id.setStyleSheet(f"color: {BLUE}; font-size: 18px; font-weight: 700;")
-        c_layout.addWidget(lbl_id_title)
-        c_layout.addWidget(lbl_id)
+        cl.addWidget(lbl_t)
+        cl.addWidget(lbl_id)
         layout.addWidget(card, 0, Qt.AlignmentFlag.AlignCenter)
 
         wait = QLabel("⏳  Várakozás aktiválásra…")
         wait.setAlignment(Qt.AlignmentFlag.AlignCenter)
         wait.setStyleSheet(f"color: {TEXT_DIM}; font-size: 13px;")
         layout.addWidget(wait)
-
         return w
 
-    # ── Overlay ────────────────────────────────────────────────────────────────
+    # ── Overlay ───────────────────────────────────────────────────────────────
     def _build_overlay(self) -> QWidget:
         w = QWidget(self.centralWidget())
-        w.setStyleSheet(f"background: rgba(7,16,31,0.96);")
-
+        w.setStyleSheet("background: rgba(7,16,31,0.96);")
         layout = QVBoxLayout(w)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setSpacing(16)
@@ -612,7 +638,6 @@ class PlayerUI(QMainWindow):
         self._prog_timer.timeout.connect(self._update_progress)
         self._prog_start = 0.0
         self._prog_total = 0.0
-
         return w
 
     def resizeEvent(self, event):
@@ -622,10 +647,9 @@ class PlayerUI(QMainWindow):
             if cw:
                 self._overlay.setGeometry(0, 0, cw.width(), cw.height())
         if hasattr(self, "_main_content"):
-            self._main_content.update()
             QTimer.singleShot(0, self._layout_main_content)
 
-    # ── Óra ────────────────────────────────────────────────────────────────────
+    # ── Óra ───────────────────────────────────────────────────────────────────
     def _start_clock(self):
         self._clock_timer = QTimer()
         self._clock_timer.setInterval(1000)
@@ -633,23 +657,19 @@ class PlayerUI(QMainWindow):
         self._clock_timer.start()
         self._tick_clock()
 
-    # Magyar hónapok és napok – Windows kompatibilis, locale-független
-    _HU_MONTHS = [
-        "", "január", "február", "március", "április", "május", "június",
-        "július", "augusztus", "szeptember", "október", "november", "december"
-    ]
-    _HU_DAYS = [
-        "hétfő", "kedd", "szerda", "csütörtök", "péntek", "szombat", "vasárnap"
-    ]
+    _HU_MONTHS = ["","január","február","március","április","május","június",
+                  "július","augusztus","szeptember","október","november","december"]
+    _HU_DAYS   = ["hétfő","kedd","szerda","csütörtök","péntek","szombat","vasárnap"]
 
     def _tick_clock(self):
         now = datetime.datetime.now()
         if hasattr(self, "_lbl_clock"):
             self._lbl_clock.setText(now.strftime("%H:%M:%S"))
         if hasattr(self, "_lbl_date"):
-            month    = self._HU_MONTHS[now.month]
-            day      = self._HU_DAYS[now.weekday()]
-            self._lbl_date.setText(f"{now.year}. {month} {now.day}., {day}")
+            self._lbl_date.setText(
+                f"{now.year}. {self._HU_MONTHS[now.month]} {now.day}., "
+                f"{self._HU_DAYS[now.weekday()]}"
+            )
         if hasattr(self, "_main_content") and self._main_content.width() > 0:
             self._layout_main_content()
         self._refresh_next_bell()
@@ -657,9 +677,9 @@ class PlayerUI(QMainWindow):
     def _refresh_next_bell(self):
         if not self._bells:
             return
-        now = datetime.datetime.now()
+        now     = datetime.datetime.now()
         now_min = now.hour * 60 + now.minute
-        future = [b for b in self._bells if b["hour"] * 60 + b["minute"] > now_min]
+        future  = [b for b in self._bells if b["hour"] * 60 + b["minute"] > now_min]
         if future:
             nb = min(future, key=lambda b: b["hour"] * 60 + b["minute"])
             self._lbl_next_bell.setText(f"{nb['hour']:02d}:{nb['minute']:02d}")
@@ -667,7 +687,7 @@ class PlayerUI(QMainWindow):
         else:
             self._bell_card.hide()
 
-    # ── Hangerő ────────────────────────────────────────────────────────────────
+    # ── Hangerő ───────────────────────────────────────────────────────────────
     def _vol_up(self):
         self._volume = min(10, self._volume + 1)
         self._lbl_vol.setText(str(self._volume))
@@ -680,7 +700,7 @@ class PlayerUI(QMainWindow):
         if self.on_volume_change:
             self.on_volume_change(self._volume)
 
-    # ── Üzenet progress animáció ───────────────────────────────────────────────
+    # ── Progress / dismiss animáció ───────────────────────────────────────────
     def _start_progress(self, total_ms: int):
         self._prog_start = time.monotonic()
         self._prog_total = total_ms / 1000
@@ -706,8 +726,7 @@ class PlayerUI(QMainWindow):
 
     def _dismiss_tick(self):
         self._dismiss_step += 1
-        total_steps = 20
-        pct = max(0.0, 1.0 - self._dismiss_step / total_steps)
+        pct = max(0.0, 1.0 - self._dismiss_step / 20)
         self._prog_bar.set_pct(pct)
         if pct <= 0:
             self._dismiss_timer.stop()
@@ -716,13 +735,12 @@ class PlayerUI(QMainWindow):
     def _update_progress(self):
         if self._prog_total <= 0:
             return
-        elapsed = time.monotonic() - self._prog_start
-        pct = min(1.0, elapsed / self._prog_total)
+        pct = min(1.0, (time.monotonic() - self._prog_start) / self._prog_total)
         self._prog_bar.set_pct(pct)
         if pct >= 1.0:
             self._prog_timer.stop()
 
-    # ── Rádió pulzáló animáció ────────────────────────────────────────────────
+    # ── Rádió pulzálás ────────────────────────────────────────────────────────
     def _start_radio_pulse(self):
         self._radio_pulse_step = 0
         if self._radio_pulse_timer is None:
@@ -736,20 +754,15 @@ class PlayerUI(QMainWindow):
         opacity = 0.25 + 0.75 * (math.sin(self._radio_pulse_step * 0.065) + 1) / 2
         self._pulsing_line.set_opacity(opacity)
 
-    # ── Update banner kattintás ────────────────────────────────────────────────
     def _on_update_click(self, event):
         if self._update_click_cb:
             self._update_click_cb()
 
-    # ── Keyboard ───────────────────────────────────────────────────────────────
     def keyPressEvent(self, event):
         from PyQt6.QtCore import Qt as QtCore
         key = event.key()
         if key in (QtCore.Key.Key_Escape, QtCore.Key.Key_F11):
-            if self.isFullScreen():
-                self.showNormal()
-            else:
-                self.showFullScreen()
+            self.showNormal() if self.isFullScreen() else self.showFullScreen()
         elif key == QtCore.Key.Key_F4:
             self.close()
         elif event.text() in ("+", "="):
@@ -761,11 +774,15 @@ class PlayerUI(QMainWindow):
     # Thread-safe publikus API
     # ══════════════════════════════════════════════════════════════════════════
 
+    def set_snap_status(self, status: "SnapStatus"):
+        self._bridge.set_snap_status_signal.emit(status)
+
+    def set_ws_status(self, status: "WsStatus"):
+        self._bridge.set_ws_status_signal.emit(status)
+
+    # Kompatibilitás: régi set_online(bool) hívások
     def set_online(self, online: bool):
         self._bridge.set_online_signal.emit(online)
-
-    def set_snap_status(self, text: str):
-        self._bridge.set_snap_signal.emit(text)
 
     def set_institution(self, name: str):
         self._bridge.set_institution_signal.emit(name)
@@ -776,14 +793,14 @@ class PlayerUI(QMainWindow):
     def set_cache_status(self, text: str):
         self._bridge.set_cache_signal.emit(text)
 
-    def show_bell_banner(self, show: bool):
-        self._bridge.show_bell_banner_signal.emit(show)
+    def show_bell_overlay(self, dur_ms=None):
+        self._bridge.show_bell_overlay_signal.emit(dur_ms)
 
     def show_message_overlay(self, text: str, reading_ms: int = 0):
         self._bridge.show_msg_overlay_signal.emit(text, reading_ms)
 
-    def show_radio_overlay(self, title: str = "Iskolarádió"):
-        self._bridge.show_radio_overlay_signal.emit(title)
+    def show_radio_overlay(self, title: str = "Iskolarádió", dur_ms=None):
+        self._bridge.show_radio_overlay_signal.emit(title, dur_ms)
 
     def hide_overlay(self):
         self._bridge.hide_overlay_signal.emit()
@@ -792,40 +809,42 @@ class PlayerUI(QMainWindow):
         self._update_click_cb = on_click
         self._bridge.show_update_banner_signal.emit(text)
 
-    def show_login(self):
-        self._bridge.show_login_signal.emit()
-
-    def hide_login(self):
-        self._bridge.hide_login_signal.emit()
-
     def show_pending(self):
         self._bridge.show_pending_signal.emit()
 
     def hide_pending(self):
         self._bridge.hide_pending_signal.emit()
 
-    def set_login_error(self, msg: str):
-        self._bridge.set_login_error_signal.emit(msg)
-
     def set_volume_display(self, vol: int):
         self._bridge.set_volume_display_signal.emit(vol)
 
-    def update_radio_time(self, seconds_left: int):
-        m, s = divmod(max(0, seconds_left), 60)
-
     # ══════════════════════════════════════════════════════════════════════════
-    # Slot implementációk (Qt main thread)
+    # Qt slot implementációk (main thread)
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _do_set_online(self, online: bool):
-        self._dot.set_online(online)
-        self._lbl_status.setText("Online" if online else "Offline")
-        self._lbl_status.setStyleSheet(
-            f"color: {'#22c55e' if online else TEXT_DIM}; font-size: 12px; font-weight: 700;"
-        )
+    def _do_set_snap_status(self, status: "SnapStatus"):
+        """Snap státuszpont frissítése."""
+        state_map = {
+            SnapStatus.CONNECTED:  "green",
+            SnapStatus.CONNECTING: "blink",
+            SnapStatus.TIMEOUT:    "red",
+            SnapStatus.OFFLINE:    "red",
+        }
+        self._snap_indicator.set_state(state_map.get(status, "offline"))
 
-    def _do_set_snap(self, text: str):
-        self._lbl_snap.setText(text)
+    def _do_set_ws_status(self, status: "WsStatus"):
+        """Net státuszpont frissítése."""
+        state_map = {
+            WsStatus.CONNECTED:  "green",
+            WsStatus.CONNECTING: "blink",
+            WsStatus.TIMEOUT:    "red",
+            WsStatus.OFFLINE:    "red",
+        }
+        self._net_indicator.set_state(state_map.get(status, "offline"))
+
+    def _do_set_online_compat(self, online: bool):
+        """Kompatibilitás: régi set_online(bool) → WsStatus mappelés."""
+        self._net_indicator.set_state("green" if online else "blink")
 
     def _do_set_institution(self, name: str):
         self._lbl_inst.setText(name)
@@ -837,11 +856,38 @@ class PlayerUI(QMainWindow):
     def _do_set_cache(self, text: str):
         self._lbl_cache.setText(text)
 
-    def _do_show_bell_banner(self, show: bool):
-        if show:
-            self._bell_banner.show()
-        else:
-            self._bell_banner.hide()
+    def _do_show_bell_overlay(self, dur_ms):
+        """Bell overlay – teljes képernyős, amber színű."""
+        self._lbl_msg_text.hide()
+        self._lbl_radio_icon.hide()
+        self._lbl_radio_title.hide()
+        self._pulsing_line.hide()
+        self._btn_dismiss.hide()
+        self._prog_bar.hide()
+        if self._radio_pulse_timer:
+            self._radio_pulse_timer.stop()
+        if self._dismiss_timer:
+            self._dismiss_timer.stop()
+        self._prog_timer.stop()
+
+        self._lbl_msg_text.setText("🔔  Csengetés")
+        self._lbl_msg_text.setStyleSheet(
+            f"color: {AMBER}; font-size: 72px; font-weight: 900;"
+        )
+        self._lbl_msg_text.show()
+        self._overlay_visible = True
+        self._bell_banner.show()
+
+        if dur_ms and int(dur_ms) > 0:
+            self._prog_bar.set_colors(AMBER, ORANGE)
+            self._prog_bar.show()
+            self._start_progress(int(dur_ms))
+
+        self._overlay.show()
+        self._overlay.raise_()
+        cw = self.centralWidget()
+        if cw:
+            self._overlay.setGeometry(0, 0, cw.width(), cw.height())
 
     def _do_show_msg_overlay(self, text: str, reading_ms: int):
         self._lbl_radio_icon.hide()
@@ -852,11 +898,7 @@ class PlayerUI(QMainWindow):
             self._radio_pulse_timer.stop()
 
         l = len(text.strip())
-        if   l <= 40:  size = 52
-        elif l <= 80:  size = 38
-        elif l <= 160: size = 28
-        else:          size = 21
-
+        size = 52 if l <= 40 else 38 if l <= 80 else 28 if l <= 160 else 21
         self._lbl_msg_text.setStyleSheet(
             f"color: {TEXT}; font-size: {size}px; font-weight: 800;"
         )
@@ -874,7 +916,7 @@ class PlayerUI(QMainWindow):
         if cw:
             self._overlay.setGeometry(0, 0, cw.width(), cw.height())
 
-    def _do_show_radio_overlay(self, title: str):
+    def _do_show_radio_overlay(self, title: str, dur_ms=None):
         self._lbl_msg_text.hide()
         self._prog_bar.hide()
         self._prog_timer.stop()
@@ -890,7 +932,6 @@ class PlayerUI(QMainWindow):
         self._pulsing_line.show()
         self._btn_dismiss.show()
         self._overlay_visible = True
-
         self._start_radio_pulse()
 
         self._overlay.show()
@@ -907,25 +948,17 @@ class PlayerUI(QMainWindow):
             self._radio_pulse_timer.stop()
         self._overlay_visible = False
         self._overlay.hide()
+        self._bell_banner.hide()
 
     def _do_show_update_banner(self, text: str):
         self._lbl_update.setText(text)
         self._update_banner.show()
-
-    def _do_show_login(self):
-        pass
-
-    def _do_hide_login(self):
-        pass
 
     def _do_show_pending(self):
         self._stack.setCurrentIndex(1)
 
     def _do_hide_pending(self):
         self._stack.setCurrentIndex(0)
-
-    def _do_set_login_error(self, msg: str):
-        pass
 
     def _do_set_volume(self, vol: int):
         self._volume = vol
