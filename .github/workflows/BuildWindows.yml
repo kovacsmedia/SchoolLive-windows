@@ -59,6 +59,15 @@ jobs:
             --hidden-import bcrypt `
             player/main.py
 
+      - name: Generate SHA256 for standalone exe
+        # A player/updater_client.py opcionálisan letölti és checkolja
+        # a SchoolLivePlayer.exe.sha256 fájlt, ha a release-ben van.
+        shell: powershell
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 dist\SchoolLivePlayer.exe).Hash.ToLower()
+          "$hash  SchoolLivePlayer.exe" | Set-Content -NoNewline dist\SchoolLivePlayer.exe.sha256
+          Get-Content dist\SchoolLivePlayer.exe.sha256
+
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
 
@@ -96,6 +105,7 @@ jobs:
           prerelease: false
           files: |
             dist/SchoolLivePlayer.exe
+            dist/SchoolLivePlayer.exe.sha256
             installer/SchoolLiveSetup.exe
           body: |
             ## SchoolLive Player ${{ steps.version.outputs.VERSION }}
@@ -107,5 +117,11 @@ jobs:
             ### Követelmények
             - Windows 10 vagy újabb (64 bit)
             - Internetkapcsolat a SchoolLive szerverhez
+            - Snapcast Windows kliens (libopus-szal):
+              [snapcast-x.y.z-win64.zip](https://github.com/badaix/snapcast/releases)
+
+            ### Automatikus frissítés
+            A futó kliens 24 óránként ellenőrzi a legújabb release-t és magától
+            frissül a SHA256 ellenőrzés után.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

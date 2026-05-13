@@ -21,7 +21,7 @@ from typing  import Optional, Callable
 from config import APP_VERSION, get_data_dir
 
 # ── GitHub konfig ─────────────────────────────────────────────────────────────
-GITHUB_OWNER   = "schoollive-hu"
+GITHUB_OWNER   = "kovacsmedia"
 GITHUB_REPO    = "SchoolLive-windows"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 
