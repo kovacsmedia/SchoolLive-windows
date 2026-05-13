@@ -5,6 +5,17 @@
 #   • on_status_change(SnapStatus) callback – UI státuszjelzéshez
 #   • 60s timeout: TIMEOUT állapotba vált, de tovább próbál újra
 #   • connected detektálás log-alapú (nem hamis pozitív)
+#
+# FONTOS – Opus codec támogatás:
+# A SchoolLive snapserver Opus codec-kel sugároz (`codec = opus` a server
+# config-ban), ezért a snapclient binárisnak **libopus**-szal kell buildelve
+# lennie. A hivatalos binárisok ezt tartalmazzák:
+#   • Linux: `apt install snapclient` (Debian/Ubuntu) vagy
+#            Flatpak: `flatpak install flathub org.snapcast.snapcast`
+#   • Windows: hivatalos installer a https://github.com/badaix/snapcast/releases
+#              "snapcast-x.y.z-win64.zip" → snapclient.exe libopus.dll-lel.
+# Ha a kliens csak PCM-et tud decodeolni, "Unsupported codec: opus" hibát kapsz,
+# a snapclient indul ugyan, de nincs hang.
 
 import subprocess
 import threading

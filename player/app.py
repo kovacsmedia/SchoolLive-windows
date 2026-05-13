@@ -12,6 +12,8 @@ import datetime
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+
 import api_client as api
 import audio_manager as audio
 from api_client       import DEVICE_KEY, SHORT_ID, HARDWARE_ID
@@ -19,6 +21,7 @@ from config           import load_settings, save_settings
 from snapcast_manager import SnapcastManager, SnapStatus
 from sync_client      import SyncClient, WsStatus
 from updater_client   import AutoUpdater
+from device_agent     import DeviceAgent
 from ui               import PlayerUI
 
 BEACON_INTERVAL_S = 30
@@ -61,6 +64,16 @@ class SchoolLiveApp:
         self._volume = self._settings.get("volume", 7)
         ui.set_volume_display(self._volume)
         self._handle_volume(self._volume)
+
+        # ── ESP-uniform DeviceAgent: /devices/poll → SET_VOLUME, MUTE, REBOOT,
+        # SHOW_MESSAGE, audio command ACK (a hangot a snapclient bináris kapja).
+        self._agent = DeviceAgent(
+            device_key       = DEVICE_KEY,
+            on_set_volume    = self._on_remote_set_volume,
+            on_mute          = self._on_remote_mute,
+            on_reboot        = self._on_remote_reboot,
+            on_show_message  = self._on_remote_show_message,
+        )
 
         self._updater = AutoUpdater(
             on_update_available = self._on_update_available,
@@ -125,6 +138,7 @@ class SchoolLiveApp:
         threading.Thread(target=self._sync_bells,     daemon=True).start()
         threading.Thread(target=self._bell_tick_loop, daemon=True).start()
         threading.Thread(target=self._beacon_loop,    daemon=True).start()
+        self._agent.start()
         self._updater.start()
 
     # ── Snap callbacks ────────────────────────────────────────────────────────
@@ -379,11 +393,20 @@ class SchoolLiveApp:
             try:
                 import urllib.request, json
                 from config import API_BASE
+                # ESP-uniform telemetria: volume (0-10) és muted az admin UI
+                # számára. A statusPayload-ban további állapot megjelölhető.
+                status_payload = {
+                    "snapStatus": self._snap.status.name if hasattr(self._snap, "status") else "OFFLINE",
+                    "wsOnline":   self._ws_online,
+                }
                 body = json.dumps({
                     "hardwareId": HARDWARE_ID,
                     "shortId":    SHORT_ID,
                     "platform":   "windows",
                     "appVersion": "1.1.0",
+                    "volume":     int(self._volume),
+                    "muted":      bool(self._snap_muted),
+                    "statusPayload": status_payload,
                 }).encode()
                 req = urllib.request.Request(
                     f"{API_BASE}/devices/native/beacon",
@@ -400,6 +423,49 @@ class SchoolLiveApp:
             except Exception:
                 pass
             time.sleep(BEACON_INTERVAL_S)
+
+    # ── Remote parancsok (DeviceAgent callback-ek) ────────────────────────────
+
+    def _on_remote_set_volume(self, vol: int) -> None:
+        """Backend SET_VOLUME parancs → UI + Snap volume frissítés (0..10)."""
+        try:
+            self.ui.set_volume_display(vol)
+        except Exception:
+            pass
+        self._handle_volume(vol)
+
+    def _on_remote_mute(self, muted: bool) -> None:
+        """Backend MUTE parancs → snap mute toggle."""
+        self._snap_muted = muted
+        try:
+            self._snap.mute(muted)
+        except Exception as e:
+            print(f"[App] remote mute hiba: {e}")
+
+    def _on_remote_reboot(self) -> None:
+        """Backend REBOOT parancs → kilépés (a launcher/systemd visszahozza)."""
+        print("[App] REBOOT parancs érkezett, kilépés...")
+        try:
+            self._agent.stop()
+        except Exception:
+            pass
+        # Egy rövid várakozás, hogy az ACK HTTP request lefusson.
+        time.sleep(1)
+        sys.exit(0)
+
+    def _on_remote_show_message(self, msg: str) -> None:
+        """Backend SHOW_MESSAGE parancs → UI banner / overlay (best effort)."""
+        try:
+            # A PlayerUI-nak vagy show_banner vagy show_message_overlay függvénye van;
+            # mindkettő best-effort-ot megpróbálunk, nem fatális ha nincs.
+            if hasattr(self.ui, "show_banner"):
+                self.ui.show_banner(msg)
+            elif hasattr(self.ui, "show_message_overlay"):
+                self.ui.show_message_overlay(msg, 10000)
+            else:
+                print(f"[App] SHOW_MESSAGE (UI nincs): {msg}")
+        except Exception as e:
+            print(f"[App] show_message hiba: {e}")
 
     # ── Hangerő ──────────────────────────────────────────────────────────────
 
