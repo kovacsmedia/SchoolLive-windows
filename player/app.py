@@ -211,6 +211,14 @@ class SchoolLiveApp:
         if not prepare:
             return
 
+        # PREPARE-en NEM célzott eszközön se snap-en, se lokálisan ne szóljon
+        # a hang, és HUD se jelenjen meg. A `_snap_muted` flag-et a PREPARE
+        # állítja be a `targetDeviceIds` alapján. (Egyezően az Android
+        # `applyTargeting` skip-pel.)
+        if self._snap_muted:
+            print(f"[App] PLAY: nem-célzott eszköz (snap muted), skip")
+            return
+
         server_now = self._ws.clock.server_now_ms()
         if play_at_ms:
             delay_ms = play_at_ms - server_now
@@ -248,6 +256,16 @@ class SchoolLiveApp:
         snap_active = msg.get("snapcastActive", False)
         dur_ms      = msg.get("durationMs")
         snap_usable = snap_active and self._snap_usable()
+
+        # HUD-célzás: a NOW_PLAYING_INFO / immediate BELL / TTS / PLAY_URL
+        # broadcast minden tenant-eszközre megy (a backend source:start
+        # eventjén nincs targeting-lista). Az utolsó PREPARE célzása alapján
+        # `_snap_muted` jelzi, hogy a kliens hallja-e a snap streamet. Ha
+        # nem hallja, akkor HUD-ot sem mutatunk – egyezően az Android
+        # kliens viselkedésével.
+        if self._snap_muted and action in ("BELL", "TTS", "PLAY_URL", "NOW_PLAYING_INFO"):
+            print(f"[App] {action}: snap muted (nem célzott) → HUD skip")
+            return
 
         if action == "BELL":
             url = msg.get("url", "")
