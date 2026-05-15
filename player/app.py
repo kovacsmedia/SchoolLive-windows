@@ -279,6 +279,21 @@ class SchoolLiveApp:
         elif action == "STOP_PLAYBACK":
             self._do_stop()
 
+        elif action == "NOW_PLAYING_INFO":
+            # Backend forrás-start: az aktuálisan szóló forrás HUD-frissítése.
+            # A snap stream folyamatosan megy, csak az UI-t frissítjük.
+            title = msg.get("title") or ""
+            job_type = msg.get("jobType") or ""
+            source_type = msg.get("sourceType") or ""
+            print(f"[App] NOW_PLAYING_INFO: {job_type} '{title}' (source={source_type})")
+            try:
+                if hasattr(self.ui, "show_now_playing"):
+                    self.ui.show_now_playing(title, job_type)
+                elif title and hasattr(self.ui, "show_radio_overlay"):
+                    self.ui.show_radio_overlay(title, 0)
+            except Exception:
+                pass
+
         elif action == "SYNC_BELLS":
             threading.Thread(target=self._sync_bells, daemon=True).start()
 
