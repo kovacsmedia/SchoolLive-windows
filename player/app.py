@@ -22,6 +22,7 @@ from snapcast_manager import SnapcastManager, SnapStatus
 from sync_client      import SyncClient, WsStatus
 from updater_client   import AutoUpdater
 from device_agent     import DeviceAgent
+from system_volume    import set_system_volume, set_system_mute
 from ui               import PlayerUI
 
 BEACON_INTERVAL_S = 30
@@ -450,12 +451,14 @@ class SchoolLiveApp:
         self._handle_volume(vol)
 
     def _on_remote_mute(self, muted: bool) -> None:
-        """Backend MUTE parancs → snap mute toggle."""
+        """Backend MUTE parancs → snap mute toggle + OS master mute."""
         self._snap_muted = muted
         try:
             self._snap.mute(muted)
         except Exception as e:
             print(f"[App] remote mute hiba: {e}")
+        # OS master mute is (nircmd, ha PATH-on)
+        set_system_mute(muted)
 
     def _on_remote_reboot(self) -> None:
         """Backend REBOOT parancs → kilépés (a launcher/systemd visszahozza)."""
@@ -486,7 +489,11 @@ class SchoolLiveApp:
 
     def _handle_volume(self, vol: int) -> None:
         self._volume = vol
+        # 1) snapclient saját puffer-gain (csak a snap stream-re hat)
         self._snap.set_volume(int(vol * 10))
+        # 2) OS master mixer is mozogjon, hogy a 10/10 tényleg max hangerő legyen
+        #    (nircmd, ha telepítve van a PATH-on)
+        set_system_volume(int(vol * 10))
         self._settings["volume"] = vol
         save_settings(self._settings)
 
