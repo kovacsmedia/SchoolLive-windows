@@ -12,8 +12,8 @@ import threading
 import urllib.request
 from enum import Enum, auto
 from typing import Optional, Callable
-from api_client import SHORT_ID
-from config import WS_URL, API_BASE
+from api_client import SHORT_ID, get_cached_tenant_id, locate_node
+from config import get_ws_url, get_api_base, set_api_base
 
 try:
     import websockets
@@ -38,7 +38,7 @@ class ClockSync:
         for _ in range(6):
             try:
                 t0   = time.monotonic()
-                resp = urllib.request.urlopen(f"{API_BASE}/time", timeout=3)
+                resp = urllib.request.urlopen(f"{get_api_base()}/time", timeout=3)
                 t1   = time.monotonic()
                 data = json.loads(resp.read())
                 rtt_ms = (t1 - t0) * 1000
@@ -95,6 +95,11 @@ class SyncClient:
         self.clock             = ClockSync()
         self._reconnect_delay  = 3
         self._connect_start: Optional[float] = None
+        # Multi-node cluster: hány egymást követő reconnect-kísérlet szállt el
+        # UGYANAZON hoston – ha ez elér egy küszöböt, feltételezzük hogy a
+        # node halott (nem tudott NODE_REASSIGNED-et küldeni), és a
+        # /cluster/locate fallbackot próbáljuk.
+        self._consecutive_failures = 0
 
     @property
     def status(self) -> "WsStatus":
@@ -212,7 +217,7 @@ class SyncClient:
                 await asyncio.sleep(5)
                 continue
 
-            url = f"{WS_URL}?deviceKey={self._device_key}"
+            url = f"{get_ws_url()}?deviceKey={self._device_key}"
             try:
                 async with websockets.connect(
                     url,
@@ -222,6 +227,7 @@ class SyncClient:
                 ) as ws:
                     self._ws = ws
                     self._connect_start = None
+                    self._consecutive_failures = 0
                     self._set_status(WsStatus.CONNECTED)
                     print("[SyncClient] ✅ Csatlakozva")
                     asyncio.get_event_loop().run_in_executor(None, self.clock.sync)
@@ -239,10 +245,30 @@ class SyncClient:
                 if e.code == 4010:
                     print("[SyncClient] 4010 – replaced, 10s várakozás")
                     await asyncio.sleep(10)
+                elif e.code == 4009:
+                    # Multi-node cluster: a tenant elköltözött. A régi (élő)
+                    # node ELŐBB küldött egy NODE_REASSIGNED üzenetet (ld.
+                    # _handle) – mire idáig érünk, get_ws_url() már az új
+                    # hostot adja vissza, a köv. iteráció automatikusan oda
+                    # csatlakozik. Nincs teendő itt, csak a sima (rövid)
+                    # reconnect-delay-t hagyjuk érvényesülni.
+                    print("[SyncClient] 4009 – tenant másik node-ra költözött")
                 else:
                     print(f"[SyncClient] WS bontva: {e}")
             except Exception as e:
                 print(f"[SyncClient] WS hiba: {e}")
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= 4:
+                    # Feltehetően a jelenlegi host halott (nem tudott
+                    # NODE_REASSIGNED-et küldeni) – /cluster/locate fallback
+                    # a cache-elt tenantId alapján.
+                    self._consecutive_failures = 0
+                    tenant_id = get_cached_tenant_id()
+                    if tenant_id:
+                        new_host = await self._loop.run_in_executor(None, locate_node, tenant_id)
+                        if new_host and new_host != get_api_base().replace("https://", "").replace("http://", "").split("/")[0]:
+                            print(f"[SyncClient] /cluster/locate fallback → {new_host}")
+                            set_api_base(f"https://{new_host}")
             finally:
                 self._ws = None
                 if self._status == WsStatus.CONNECTED:
@@ -257,6 +283,17 @@ class SyncClient:
             await asyncio.sleep(self._reconnect_delay)
 
     def _handle(self, msg: dict) -> None:
+        if msg.get("type") == "NODE_REASSIGNED":
+            # Multi-node cluster: a régi (élő) node ezt küldi el, MIELŐTT a
+            # rebalancing miatt lezárná a kapcsolatot (4009 close code követi).
+            # Azonnal átállítjuk a base URL-t – a _connect_loop köv. iterációja
+            # (get_ws_url()) magától az új host felé fog csatlakozni.
+            new_host = msg.get("hostname")
+            if new_host:
+                print(f"[SyncClient] NODE_REASSIGNED → {new_host}")
+                set_api_base(f"https://{new_host}")
+            return
+
         if msg.get("type") == "HELLO":
             try:
                 self.clock._offset_ms = int(msg["serverNowMs"]) - time.time() * 1000
