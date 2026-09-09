@@ -42,8 +42,12 @@ class SchoolLiveApp:
         self._status   = "provisioning"
         self._ws_online  = False
         self._snap_muted = False
-        self._last_bell_key   = ""
         self._device_id: Optional[str] = None
+        # Offline csengetés állapota (ld. _bell_tick_loop)
+        self._bell_state_date: Optional[datetime.date] = None
+        self._bell_armed:   set = set()
+        self._bell_handled: set = set()
+        self._last_online_bell_ts: float = 0.0
 
         # ── Snapcast manager ──────────────────────────────────────────────────
         self._snap = SnapcastManager(
@@ -137,6 +141,13 @@ class SchoolLiveApp:
         threading.Thread(target=_fetch_info, daemon=True).start()
         self._ws.start()
         threading.Thread(target=self._sync_bells,     daemon=True).start()
+        # A csomagolt default csengetőhangok bemásolása a cache-be – ez az
+        # utolsó védvonal, ha a beállított hang nem tölthető le.
+        try:
+            audio.ensure_default_sounds_cached()
+        except Exception as e:
+            print(f"[App] default hang cache hiba: {e}")
+
         threading.Thread(target=self._bell_tick_loop, daemon=True).start()
         threading.Thread(target=self._beacon_loop,    daemon=True).start()
         self._updater.start()
@@ -184,6 +195,12 @@ class SchoolLiveApp:
     def _on_prepare(self, msg: dict) -> None:
         command_id  = msg.get("commandId", "")
         snap_active = msg.get("snapcastActive", False)
+
+        # Bizonyíték arra, hogy az online csengetés-út működik: ha erre a
+        # csengetésre megjött a PREPARE, a helyi (offline) lejátszást KI KELL
+        # hagyni, különben duplán szólna. Ld. _bell_tick_loop.
+        if msg.get("action", "") == "BELL":
+            self._last_online_bell_ts = time.time()
 
         target_ids = msg.get("targetDeviceIds")
         if target_ids is not None and isinstance(target_ids, list):
@@ -277,10 +294,14 @@ class SchoolLiveApp:
         if action == "BELL":
             url = msg.get("url", "")
             now = datetime.datetime.now()
-            key = f"{now.hour}:{now.minute}"
-            if self._last_bell_key == key:
+            key = f"{now.hour:02d}:{now.minute:02d}"
+            # Ugyanaz a két állapot, amit a _bell_tick_loop olvas: percenkénti
+            # de-duplikáció ÉS annak jelzése, hogy erre a percre az online út
+            # már gondoskodott a csengetésről.
+            if key in self._bell_handled:
                 return
-            self._last_bell_key = key
+            self._bell_handled.add(key)
+            self._last_online_bell_ts = time.time()
             self._dispatch_action({
                 "action": "BELL", "url": url, "text": None, "title": None,
                 "duration_ms": dur_ms, "snap_usable": snap_usable,
@@ -429,6 +450,10 @@ class SchoolLiveApp:
             self.ui.set_cache_status("Csengetési rend lekérés sikertelen")
             return
 
+        # A hangfájlok tényleges URL-jei (tenant-szeparált tárolás miatt a
+        # kliens már nem rakhatja össze magától – ld. audio_manager._sound_url).
+        audio.register_sound_urls(data.get("sounds"))
+
         bells = [] if data.get("isHoliday") else (data.get("bells") or [])
         self._bells      = bells
         self._bells_date = datetime.date.today()
@@ -464,47 +489,133 @@ class SchoolLiveApp:
 
     # ── Offline bell tick ─────────────────────────────────────────────────────
 
+    # ── Offline csengetés ─────────────────────────────────────────────────────
+    #
+    # A szabály MINDHÁROM kliensen (ESP32 / Linux / Windows) azonos – korábban
+    # háromféle volt, ami ugyanabban a helyzetben eltérő viselkedést adott:
+    #   ESP32:   !ws && !snap   → a backend-folyamat leállásakor (deploy!) néma
+    #                             maradt, mert a snapserver KÜLÖN PM2 processz,
+    #                             és a snapclient-kapcsolat élve maradt
+    #   Linux:   !ws            → nem vette észre, ha a snap-kapcsolat halt meg
+    #   Windows: !snap          → nem vette észre, ha a backend halt meg
+    #
+    # Helyesen: az online csengetéshez MINDKETTŐ kell (a backend hajtja a
+    # mixert – ezt a WS jelzi –, a hang pedig a snap-streamen érkezik), tehát
+    #     "a backend elérhető"  ==  ws ÉS snap
+    #
+    # Időzítés (a megrendelt viselkedés szerint):
+    #   • T-60 mp-től folyamatosan figyeljük az elérhetőséget ("felfegyverzés")
+    #   • T-kor: ha a backend a csengetéshez tartozó PREPARE-t elküldte, ŐT
+    #     hagyjuk dolgozni (ez a legmegbízhatóbb jel – közvetlenül azt méri,
+    #     hogy az online út működött-e, nem tippel a kapcsolat állapotából)
+    #   • ha T-60-kor nem volt elérhető, vagy most sem az → AZONNAL helyben
+    #     játszunk
+    #   • ha bizonytalan (kapcsolat él, de PREPARE nem jött) → türelmi idő,
+    #     utána mégis helyben játszunk, hogy a csengetés ne maradjon el
+    BELL_LEAD_CHECK_S      = 60
+    BELL_GRACE_S           = 4
+    BELL_ONLINE_EVIDENCE_S = 15
+    BELL_CATCHUP_MAX_S     = 120   # ennél régebbi csengetést már NEM pótolunk
+
+    def _backend_reachable(self) -> bool:
+        """Az online csengetéshez MINDKETTŐ kell: a backend WS (ő indítja a
+        mixert) és az élő snap-kapcsolat (azon jön a hang)."""
+        #
+        # MEGJEGYZÉS a `snap.connected` megbízhatóságáról: a két kliens eltérően
+        # állapítja meg (Linux: a folyamat elindult; Windows: log-marker alapján,
+        # `--logfilter error` mellett viszont a "connected" sorok lehet, hogy meg
+        # sem jelennek). Ez a döntés ettől FÜGGETLENÜL helyes marad, mert a
+        # tényleges dupla-csengetés elleni védelem nem ez, hanem a BELL PREPARE
+        # bizonyíték (`_last_online_bell_ts`) a _bell_tick_loop-ban:
+        #   • ha a snap tévesen "nem elérhető" → a PREPARE úgyis leállít minket
+        #   • ha tévesen "elérhető" → a PREPARE hiánya + türelmi idő után
+        #     mégis lejátsszuk helyben
+        return bool(self._ws_online) and bool(self._snap.connected)
+
+    def _reset_bell_day_state(self, today: datetime.date) -> None:
+        if self._bell_state_date != today:
+            self._bell_state_date = today
+            self._bell_armed.clear()
+            self._bell_handled.clear()
+
     def _bell_tick_loop(self) -> None:
-        """
-        Offline csengetés: csak ha snap NEM elérhető.
-        Ha snap elérhető → a szerver küldi a BELL parancsot.
-        """
         while True:
-            time.sleep(5)
-            if self._status != "active":
-                continue
-            if self._snap_usable():
-                continue
+            time.sleep(1)
+            try:
+                if self._status != "active":
+                    continue
+                bells = self._bells_for_today()
+                if not bells:
+                    continue
 
-            bells = self._bells_for_today()
-            if not bells:
-                continue
+                now   = datetime.datetime.now()
+                today = now.date()
+                self._reset_bell_day_state(today)
+                reachable = self._backend_reachable()
 
-            now = datetime.datetime.now()
-            if now.second > 58:
-                continue
+                for b in bells:
+                    try:
+                        hour, minute = int(b["hour"]), int(b["minute"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
 
-            key = f"{now.hour}:{now.minute}"
-            if self._last_bell_key == key:
-                continue
+                    key = f"{hour:02d}:{minute:02d}"
+                    if key in self._bell_handled:
+                        continue
 
-            due = next(
-                (b for b in bells
-                 if b["hour"] == now.hour and b["minute"] == now.minute),
-                None,
-            )
-            if not due:
-                continue
+                    bell_at = now.replace(hour=hour, minute=minute,
+                                          second=0, microsecond=0)
+                    dt = (now - bell_at).total_seconds()
 
-            self._last_bell_key = key
-            sound_file = due.get("soundFile", "kibecsengo.mp3")
-            print(f"[App] 🔔 Offline bell: {sound_file} ({now.hour:02d}:{now.minute:02d})")
-            self.ui.show_bell_overlay(None)
-            audio.play_bell(
-                sound_file,
-                self._volume / 10.0,
-                on_done=lambda: self.ui.hide_overlay(),
-            )
+                    # 1) Előzetes ellenőrzés T-60 mp-től, folyamatosan frissítve
+                    if -self.BELL_LEAD_CHECK_S <= dt < 0:
+                        if reachable:
+                            self._bell_armed.discard(key)
+                        elif key not in self._bell_armed:
+                            self._bell_armed.add(key)
+                            print(f"[App] 🔕 {key}: a backend nem érhető el "
+                                  f"({int(-dt)} mp-cel a csengetés előtt) → offline lejátszásra készülünk")
+                        continue
+
+                    if dt < 0:
+                        continue
+
+                    # Felső korlát: ha az alkalmazás egy már elmúlt csengetés
+                    # UTÁN indult el (vagy sokáig aludt a gép), NE pótoljuk
+                    # utólag – egy délután induló kliens ne csengessen rá a
+                    # reggeli időpontokra.
+                    if dt > self.BELL_CATCHUP_MAX_S:
+                        self._bell_handled.add(key)
+                        self._bell_armed.discard(key)
+                        continue
+
+                    # 2) A csengetés pillanata (és utána). Ha a backend elküldte
+                    #    a BELL PREPARE-t, az online út működik – ő játssza le.
+                    #    Ez zárja ki a dupla csengetést.
+                    if (time.time() - self._last_online_bell_ts) <= self.BELL_ONLINE_EVIDENCE_S:
+                        self._bell_handled.add(key)
+                        continue
+
+                    armed = key in self._bell_armed
+                    if armed or not reachable:
+                        pass                       # biztosan offline → azonnal
+                    elif dt < self.BELL_GRACE_S:
+                        continue                   # még várunk a PREPARE-re
+                    # else: letelt a türelmi idő, PREPARE nélkül → mégis mi játsszuk
+
+                    self._bell_handled.add(key)
+                    self._bell_armed.discard(key)
+                    sound_file = b.get("soundFile", "kibecsengo.mp3")
+                    print(f"[App] 🔔 Offline csengetés: {key} ({sound_file}, "
+                          f"ws={self._ws_online} snap={self._snap.connected})")
+                    self.ui.show_bell_overlay(None)
+                    audio.play_bell(
+                        sound_file,
+                        self._volume / 10.0,
+                        on_done=lambda: self.ui.hide_overlay(),
+                    )
+            except Exception as e:
+                print(f"[App] bell tick hiba: {e}")
 
     # ── Beacon ───────────────────────────────────────────────────────────────
     #
@@ -516,6 +627,9 @@ class SchoolLiveApp:
     def _beacon_loop(self) -> None:
         while True:
             try:
+                # Multi-node: ha a tenant időközben másik node-ra került, a
+                # snapclientet is át kell irányítani (a WS-oldal már átállt).
+                self._snap.ensure_current_host()
                 status_payload = {
                     "snapStatus": self._snap.status.name if hasattr(self._snap, "status") else "OFFLINE",
                     "wsOnline":   self._ws_online,
